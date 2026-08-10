@@ -121,4 +121,58 @@ def test_article_publish_timeout_is_unknown_instead_of_safe_to_retry():
     assert result.state == "unknown"
     assert result.http_status is None
     assert result.error == "request timed out; remote publish state is unknown"
+
+
+def test_http_200_without_explicit_business_success_is_unknown():
+    def ambiguous(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"message": "accepted"}, request=request)
+
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(ambiguous)),
+    )
+    preview = publisher.preview(
+        ArticlePublicationSpec(
+            markdown="---\ntitle: test\n---\nbody\n",
+            source_slug="test-article",
+            target_slug="test-article",
+            wechat_html="<p>test</p>",
+            cover_png=b"png",
+            push_to_wechat=True,
+        )
+    )
+
+    result = publisher.publish(preview)
+
+    assert result.state == "unknown"
+
+
+def test_site_success_with_explicit_wechat_failure_is_partial():
+    def partial(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"success": True, "wechatPushed": False, "wechatError": "failed"},
+            request=request,
+        )
+
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(partial)),
+    )
+    preview = publisher.preview(
+        ArticlePublicationSpec(
+            markdown="---\ntitle: test\n---\nbody\n",
+            source_slug="test-article",
+            target_slug="test-article",
+            wechat_html="<p>test</p>",
+            cover_png=b"png",
+            push_to_wechat=True,
+        )
+    )
+
+    result = publisher.publish(preview)
+
+    assert result.state == "partial"
     assert "local-test-secret" not in result.model_dump_json()

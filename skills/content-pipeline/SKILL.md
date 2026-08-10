@@ -39,6 +39,8 @@ After approval, allow the website/WeChat publication branch and video-rendering 
 
 Use `acp article approve-publication` to bind the exact article revision, cover revision, target slug, and WeChat action. Run `acp article preview` before `acp article publish`. Never reconstruct an approval key manually.
 
+Prefer `acp run` after the preview and approvals. First invoke it without `--execute` and show the exact dry-run plan. Only add `--execute` after the user confirms that plan. The written and video branches may share one run because they are independent; social publication must wait for the newly rendered video to be shown and separately approved.
+
 ### Confirm the video branch
 
 Show the rendered MP4 path and preview. Require explicit approval of the video and platform copy before any social-platform submission.
@@ -52,11 +54,11 @@ Before Edge TTS, tell the user that narration text is sent to Microsoft's online
 - Open visible local Chrome windows when login, captcha, QR scanning, or platform confirmation is needed.
 - Tell the user which platform will open and that its dedicated local Chrome Profile retains login state.
 - Treat every platform as an independent publication. Continue other selected platforms after one fails unless the failure invalidates the shared video.
-- Retry only the named failed or reconciled-absent stage.
+- Use `acp retry --product ... --stage ...` without `--execute` to show the exact stored replay command. Retry only the named `failed` or `waiting_for_user` stage, and add `--execute` only after confirmation.
 - Treat timeouts after submission as unknown. Query status before retrying.
 - Never replay website or WeChat publication during a social-platform retry.
 - Record `video` approval for the exact render, then use `acp social approve-publication` separately for each platform. `acp social publish` automatically opens or reconnects to that platform's dedicated Chrome Profile.
-- If the CLI returns `waiting_for_user`, leave the visible window open, ask the user to complete login or required options, and rerun only the same platform command.
+- If the CLI returns `waiting_for_user`, leave the visible window open, ask the user to complete login or required options, then use `acp retry` for only that platform stage.
 - If the CLI returns `unknown`, stop. Do not click publish again until the platform page or account proves the first submission was absent.
 
 ## Hard stops

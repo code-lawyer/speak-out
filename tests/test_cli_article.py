@@ -176,7 +176,12 @@ request_timeout_seconds = 30
         return ArticlePublishResult(
             state=PublicationState.SUCCEEDED,
             http_status=200,
-            response={"success": True, "wechatPushed": True, "url": "/articles/publish-test"},
+            response={
+                "success": True,
+                "wechatPushed": True,
+                "url": "/articles/publish-test",
+                "accessToken": "remote-secret-token",
+            },
         )
 
     monkeypatch.setattr(cli.FixedIpVpsPublisher, "publish", succeed)
@@ -205,3 +210,6 @@ request_timeout_seconds = 30
     log_text = (product.root / payload["logFile"]).read_text(encoding="utf-8")
     assert "publish-secret" not in result.stdout + log_text
     assert "private-cover-bytes" not in result.stdout + log_text
+    assert "remote-secret-token" not in result.stdout + log_text
+    assert payload["response"]["accessToken"] == "[REDACTED]"
+    assert payload["state"] == "succeeded"

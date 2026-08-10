@@ -22,7 +22,7 @@ Pipeline Module
 
 ## Domain model
 
-The Product is the durable aggregate. Its user-readable `product.toml` identifies the Product and selected revisions. Its SQLite state records runs, approvals, stages, attempts, external IDs, and redacted results.
+The Product is the durable aggregate. Its user-readable `product.toml` identifies the Product and selected revisions. Its SQLite state records approvals, independent publication results, stage attempts, exact replay commands, and redacted results.
 
 Every side-effecting stage uses an idempotency key derived from Product ID, artifact revision, destination, and intended action. A successful publication is terminal unless the user explicitly creates a new revision or duplicate-publication override.
 
@@ -62,6 +62,8 @@ Direct or substantial upstream reuse must retain copyright and MIT notices in so
 
 ## Failure model
 
-Stages have `pending`, `running`, `waiting_for_user`, `succeeded`, `failed`, and `unknown` outcomes. A network timeout after an external request is `unknown`, not `failed`, until reconciliation proves whether the platform accepted it.
+Stage plans and attempts use `planned`, `running`, `waiting_for_user`, `succeeded`, `failed`, `partial`, `unknown`, `skipped`, and `blocked`. A network timeout after an external request is `unknown`, not `failed`, until reconciliation proves whether the destination accepted it. `partial` means a compound destination proved only part of its contract—for example, the website succeeded but WeChat draft creation failed.
 
 Website/WeChat, rendering, and each social platform are separate publication domains. Success in one domain never implies success in another and is never rolled back by another domain's failure.
+
+`acp run` is dry-run by default. Execution persists each exact child command and continues other independent stages after a failure. `acp retry` is deliberately narrower: it replays only the latest exact command for a named `failed` or `waiting_for_user` stage. `unknown`, `partial`, and successful results cannot be replayed until externally reconciled or replaced by a newly approved revision.

@@ -35,6 +35,7 @@ class ArticlePublishPreview(BaseModel):
 
 class PublicationState(StrEnum):
     SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
     FAILED = "failed"
     UNKNOWN = "unknown"
 
@@ -72,18 +73,18 @@ def interpret_article_result(result: ArticlePublishResult) -> ArticleChannelRepo
     return ArticleChannelReport(site=site, cover="unknown", wechat="unknown")
 
 
-def _redact(value: Any) -> Any:
+def redact_publication_data(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             key: (
                 "[REDACTED]"
                 if re.search(r"(?:secret|token|password|authorization|base64)", key, re.IGNORECASE)
-                else _redact(item)
+                else redact_publication_data(item)
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact(item) for item in value]
+        return [redact_publication_data(item) for item in value]
     return value
 
 
@@ -110,7 +111,7 @@ def write_article_publish_log(
         "site": channels.site,
         "cover": channels.cover,
         "wechat": channels.wechat,
-        "response": _redact(result.response),
+        "response": redact_publication_data(result.response),
         "error": result.error,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -182,12 +183,20 @@ class FixedIpVpsPublisher:
             response_body = response.json()
         except ValueError:
             response_body = {"raw": response.text}
+        if not response.is_success or response_body.get("success") is False:
+            state = PublicationState.FAILED
+        elif response_body.get("success") is not True:
+            state = PublicationState.UNKNOWN
+        elif preview.request_body.get("pushToWechat") is not True:
+            state = PublicationState.SUCCEEDED
+        elif response_body.get("wechatPushed") is True:
+            state = PublicationState.SUCCEEDED
+        elif response_body.get("wechatPushed") is False:
+            state = PublicationState.PARTIAL
+        else:
+            state = PublicationState.UNKNOWN
         return ArticlePublishResult(
-            state=(
-                PublicationState.SUCCEEDED
-                if response.is_success
-                else PublicationState.FAILED
-            ),
+            state=state,
             http_status=response.status_code,
             response=response_body,
         )

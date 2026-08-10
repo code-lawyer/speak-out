@@ -30,6 +30,17 @@ class AlreadyPublished(RuntimeError):
         super().__init__(f"publication already succeeded: {destination}:{idempotency_key}")
 
 
+class UnsafeToRetry(RuntimeError):
+    def __init__(self, destination: str, idempotency_key: str, prior_state: str) -> None:
+        self.destination = destination
+        self.idempotency_key = idempotency_key
+        self.prior_state = prior_state
+        super().__init__(
+            f"publication state {prior_state} must be reconciled before retry: "
+            f"{destination}:{idempotency_key}"
+        )
+
+
 def article_publication_approval_key(
     article_revision: str,
     cover_revision: str,
@@ -82,8 +93,11 @@ class ArticlePublicationWorkflow:
             raise ApprovalRequired(missing)
 
         destination = "website-wechat"
-        if self._publications.get_state(destination, publication_key) == "succeeded":
+        prior_state = self._publications.get_state(destination, publication_key)
+        if prior_state == "succeeded":
             raise AlreadyPublished(destination, publication_key)
+        if prior_state in {"partial", "unknown"}:
+            raise UnsafeToRetry(destination, publication_key, prior_state)
 
         result = self._publisher.publish(self._publisher.preview(spec))
         self._publications.record_state(destination, publication_key, result.state.value)

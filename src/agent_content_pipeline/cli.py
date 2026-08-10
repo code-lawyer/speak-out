@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import random
 import sys
 import time
@@ -24,9 +25,15 @@ from .publishing.article import (
     FixedIpVpsPublisher,
     PublicationState,
     interpret_article_result,
+    redact_publication_data,
     write_article_publish_log,
 )
-from .state import ApprovalLedger, ApprovalScope, PublicationLedger
+from .orchestration import (
+    PipelineOrchestrator,
+    RetryNotAllowed,
+    StageCommand,
+)
+from .state import ApprovalLedger, ApprovalScope, PublicationLedger, StageAttemptLedger, StageState
 from .validation import (
     validate_article_release,
     validate_png_cover,
@@ -276,13 +283,14 @@ def publish_article(
     payload = {
         "ok": result.state == PublicationState.SUCCEEDED,
         "mode": "publish",
+        "state": result.state.value,
         "httpStatus": result.http_status,
         "sourceSlug": preview.source_slug,
         "slug": preview.target_slug,
         "site": channels.site,
         "cover": channels.cover,
         "wechat": channels.wechat,
-        "response": result.response,
+        "response": redact_publication_data(result.response),
         "error": result.error,
         "logFile": str(log_path.relative_to(product.root)),
     }
@@ -294,6 +302,216 @@ def publish_article(
         typer.echo(f"WeChat draft: {channels.wechat}")
         typer.echo(f"Log: {log_path}")
     if result.state != PublicationState.SUCCEEDED:
+        raise typer.Exit(code=1)
+
+
+def _stage_command_key(stage: str, args: tuple[str, ...]) -> str:
+    encoded = json.dumps([stage, *args], ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return f"{stage}:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _build_stage_commands(
+    *,
+    project_root: Path,
+    product_root: Path,
+    stages: list[str],
+    article_revision: str | None,
+    cover_revision: str | None,
+    target_slug: str | None,
+    allow_duplicate_site: bool,
+    script_revision: str | None,
+    material_revision: str | None,
+    bgm_directory: Path | None,
+    video_revision: str | None,
+    copy_revision: str | None,
+) -> tuple[StageCommand, ...]:
+    product = ProductWorkspace(product_root.parent).load(product_root)
+    project_root = project_root.resolve()
+    product_root = product.root.resolve()
+    allowed = {
+        "article",
+        "video",
+        "social:xiaohongshu",
+        "social:douyin",
+        "social:bilibili",
+    }
+    invalid = [stage for stage in stages if stage not in allowed]
+    if invalid:
+        raise typer.BadParameter("unsupported stage: " + ", ".join(invalid), param_hint="--stage")
+    if not stages:
+        raise typer.BadParameter("at least one --stage is required", param_hint="--stage")
+
+    commands: list[StageCommand] = []
+    for stage in stages:
+        if stage == "article":
+            if not article_revision or not cover_revision:
+                raise typer.BadParameter(
+                    "article stage requires --article-revision and --cover-revision",
+                    param_hint="--stage article",
+                )
+            destination_slug = target_slug or product.manifest.slug
+            if destination_slug != product.manifest.slug and not allow_duplicate_site:
+                raise typer.BadParameter(
+                    "an override slug creates a duplicate website article; "
+                    "explicit --allow-duplicate-site is required"
+                )
+            args = (
+                "article",
+                "publish",
+                "--project-root",
+                str(project_root),
+                "--product",
+                str(product_root),
+                "--article-revision",
+                article_revision,
+                "--cover-revision",
+                cover_revision,
+            )
+            if target_slug is not None:
+                args += ("--target-slug", target_slug)
+            if allow_duplicate_site:
+                args += ("--allow-duplicate-site",)
+            args += ("--json",)
+            key = article_publication_approval_key(
+                article_revision,
+                cover_revision,
+                destination_slug,
+                True,
+            )
+        elif stage == "video":
+            if not script_revision:
+                raise typer.BadParameter(
+                    "video stage requires --script-revision",
+                    param_hint="--stage video",
+                )
+            args = (
+                "video",
+                "render",
+                "--project-root",
+                str(project_root),
+                "--product",
+                str(product_root),
+                "--script-revision",
+                script_revision,
+            )
+            if material_revision is not None:
+                args += ("--material-revision", material_revision)
+            if bgm_directory is not None:
+                args += ("--bgm-directory", str(bgm_directory.resolve()))
+            args += ("--json",)
+            key = _stage_command_key(stage, args)
+        else:
+            if not video_revision or not copy_revision:
+                raise typer.BadParameter(
+                    f"{stage} requires --video-revision and --copy-revision",
+                    param_hint=f"--stage {stage}",
+                )
+            platform = SocialPlatform(stage.split(":", 1)[1])
+            args = (
+                "social",
+                "publish",
+                "--project-root",
+                str(project_root),
+                "--product",
+                str(product_root),
+                "--platform",
+                platform.value,
+                "--video-revision",
+                video_revision,
+                "--copy-revision",
+                copy_revision,
+                "--json",
+            )
+            key = social_publication_approval_key(video_revision, copy_revision, platform)
+        commands.append(StageCommand(stage=stage, idempotency_key=key, args=args))
+    return tuple(commands)
+
+
+def _emit_pipeline_result(result, json_output: bool) -> None:
+    if json_output:
+        typer.echo(result.model_dump_json())
+        return
+    typer.echo(f"Mode: {result.mode}")
+    for stage in result.stages:
+        typer.echo(f"{stage.stage}: {stage.state.value}")
+        if result.mode == "dry-run":
+            typer.echo("  acp " + " ".join(stage.args))
+
+
+@app.command("run")
+def run_pipeline(
+    project_root: Annotated[Path, typer.Option(help="Project repository root.")],
+    product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
+    stages: Annotated[
+        list[str],
+        typer.Option("--stage", help="article, video, or social:<platform>; repeatable."),
+    ],
+    article_revision: Annotated[str | None, typer.Option(help="Exact article revision.")] = None,
+    cover_revision: Annotated[str | None, typer.Option(help="Exact cover revision.")] = None,
+    target_slug: Annotated[str | None, typer.Option(help="Optional website target slug.")] = None,
+    allow_duplicate_site: Annotated[
+        bool,
+        typer.Option("--allow-duplicate-site", help="Acknowledge a duplicate website article."),
+    ] = False,
+    script_revision: Annotated[str | None, typer.Option(help="Approved video script.")] = None,
+    material_revision: Annotated[str | None, typer.Option(help="Local material revision.")] = None,
+    bgm_directory: Annotated[Path | None, typer.Option(help="Optional BGM directory.")] = None,
+    video_revision: Annotated[str | None, typer.Option(help="Approved video revision.")] = None,
+    copy_revision: Annotated[str | None, typer.Option(help="Exact social copy revision.")] = None,
+    execute: Annotated[
+        bool,
+        typer.Option("--execute", help="Actually execute the planned stages."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    commands = _build_stage_commands(
+        project_root=project_root,
+        product_root=product_root,
+        stages=stages,
+        article_revision=article_revision,
+        cover_revision=cover_revision,
+        target_slug=target_slug,
+        allow_duplicate_site=allow_duplicate_site,
+        script_revision=script_revision,
+        material_revision=material_revision,
+        bgm_directory=bgm_directory,
+        video_revision=video_revision,
+        copy_revision=copy_revision,
+    )
+    result = PipelineOrchestrator(StageAttemptLedger(product_root)).run(
+        commands,
+        execute=execute,
+    )
+    _emit_pipeline_result(result, json_output)
+    if execute and any(
+        stage.state not in {StageState.SUCCEEDED, StageState.SKIPPED}
+        for stage in result.stages
+    ):
+        raise typer.Exit(code=1)
+
+
+@app.command("retry")
+def retry_pipeline_stage(
+    product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
+    stage: Annotated[str, typer.Option(help="Exact stage name to retry.")],
+    execute: Annotated[
+        bool,
+        typer.Option("--execute", help="Actually execute the safe retry."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    ProductWorkspace(product_root.parent).load(product_root)
+    try:
+        result = PipelineOrchestrator(StageAttemptLedger(product_root)).retry(
+            stage,
+            execute=execute,
+        )
+    except RetryNotAllowed as error:
+        raise typer.BadParameter(str(error), param_hint="--stage") from error
+    _emit_pipeline_result(result, json_output)
+    if execute and result.stages[0].state != StageState.SUCCEEDED:
         raise typer.Exit(code=1)
 
 
@@ -923,6 +1141,20 @@ def product_status(
             for item in ApprovalLedger(product.root).list()
         ],
         "publications": PublicationLedger(product.root).list(),
+        "stageAttempts": [
+            {
+                "id": item.id,
+                "stage": item.stage,
+                "idempotencyKey": item.idempotency_key,
+                "args": list(item.args),
+                "state": item.state.value,
+                "exitCode": item.exit_code,
+                "output": item.output,
+                "startedAt": item.started_at.isoformat(),
+                "finishedAt": item.finished_at.isoformat() if item.finished_at else None,
+            }
+            for item in StageAttemptLedger(product.root).list()
+        ],
     }
     if json_output:
         typer.echo(json.dumps(payload, ensure_ascii=False))

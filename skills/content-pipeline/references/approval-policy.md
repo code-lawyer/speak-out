@@ -20,6 +20,12 @@ Treat Product, artifact revision, destination, and action as the idempotency ide
 
 A timeout or connection loss after an external request does not prove failure. Mark it unknown, query the destination or existing logs, and retry only after proving the original action did not succeed.
 
+## Orchestrated retry
+
+Start with `acp run` without `--execute`; it is a side-effect-free exact plan. After execution, inspect `acp product status --json` for each independent attempt.
+
+Use `acp retry` only for the latest `failed` or `waiting_for_user` attempt of the named stage. Never use it for `unknown`, `partial`, or successful outcomes. Reconcile those outcomes at the destination, or create and approve a new artifact revision when a new publication is intended.
+
 ## Existing website and WeChat behavior
 
 Use the configured fixed-IP VPS route. WeChat must stop at draft creation. Do not substitute AiToEarn's WeChat implementation and do not call `freepublish/submit`.

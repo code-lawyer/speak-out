@@ -82,6 +82,45 @@ uv run acp social approve-publication --product <product> --platform bilibili --
 uv run acp social publish --project-root . --product <product> --platform bilibili --video-revision v001 --copy-revision v001
 ```
 
-Use `xiaohongshu` or `douyin` for the other first-release targets. A visible local Chrome window opens automatically. If login is required, the command stops with `waiting_for_user`; complete login in that window and rerun the same command. The dedicated Profile remains under `.local/browser-profiles/<platform>/`.
+Use `xiaohongshu` or `douyin` for the other first-release targets. A visible local Chrome window opens automatically. If login is required, the command stops with `waiting_for_user`; complete login in that window and use the stage-specific `acp retry` flow below. The dedicated Profile remains under `.local/browser-profiles/<platform>/`.
+
+## Safe orchestration
+
+`acp run` prints an exact plan by default and performs no side effects. Article publication and video rendering can run as independent branches after their exact approvals:
+
+```powershell
+uv run acp run `
+  --project-root . `
+  --product <product> `
+  --stage article `
+  --stage video `
+  --article-revision v001 `
+  --cover-revision v001 `
+  --script-revision v001 `
+  --material-revision v001
+```
+
+Review the plan, then add `--execute`. One branch failing does not cancel or roll back a successful independent branch. After reviewing and approving the rendered video and social copy, plan and execute the three social stages:
+
+```powershell
+uv run acp run `
+  --project-root . `
+  --product <product> `
+  --stage social:xiaohongshu `
+  --stage social:douyin `
+  --stage social:bilibili `
+  --video-revision v001 `
+  --copy-revision v001 `
+  --execute
+```
+
+Every attempted stage is recorded in the Product's SQLite state and shown by `acp product status --json`. Retry only a named stage:
+
+```powershell
+uv run acp retry --product <product> --stage social:douyin
+uv run acp retry --product <product> --stage social:douyin --execute
+```
+
+Retry is accepted only when that stage's latest attempt is `failed` or `waiting_for_user`. `unknown`, `partial`, and already successful outcomes require reconciliation or a new explicitly approved revision; the CLI will not replay them.
 
 See [PRODUCT.md](docs/PRODUCT.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md), and [DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md).
