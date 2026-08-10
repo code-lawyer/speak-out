@@ -152,4 +152,4 @@ Re-approve the sealed revision before using it. The command never infers or reco
 
 For a fully local narration path, supply both `--narration-audio` and `--subtitles`; Edge TTS is skipped. Omitting `--material-revision` requires `--allow-pexels-data-transfer`, because the approved search terms leave the machine. Edge TTS likewise requires `--allow-edge-tts-data-transfer` on every exact command.
 
-See [PRODUCT.md](docs/PRODUCT.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md), and [DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md).
+See [PRODUCT.md](docs/PRODUCT.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md), [DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md), and [RELEASE_EVIDENCE.md](docs/RELEASE_EVIDENCE.md).
