@@ -426,3 +426,45 @@ chrome_path = "C:/fake/chrome.exe"
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["browser"] == "closed"
     assert closed == ["bilibili"]
+
+
+def test_private_snapshot_cleanup_retries_and_records_persistent_windows_lock(
+    tmp_path,
+    monkeypatch,
+):
+    staging = tmp_path / "publish" / ".staging"
+    staging.mkdir(parents=True)
+    snapshot = staging / "private.mp4"
+    snapshot.write_bytes(b"video")
+    original_unlink = Path.unlink
+    attempts = 0
+
+    def transient_lock(path, *args, **kwargs):
+        nonlocal attempts
+        if path == snapshot and attempts < 2:
+            attempts += 1
+            raise PermissionError("file is still held by Chrome")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", transient_lock)
+    assert cli._remove_private_snapshot(snapshot, delay_seconds=0) is None
+    assert attempts == 2
+    assert snapshot.exists() is False
+
+    snapshot.write_bytes(b"video")
+
+    def persistent_lock(path, *args, **kwargs):
+        if path == snapshot:
+            raise PermissionError("file is still held by Chrome")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", persistent_lock)
+    warning = cli._remove_private_snapshot(snapshot, attempts=2, delay_seconds=0)
+    marker = snapshot.with_suffix(snapshot.suffix + ".cleanup-pending")
+    assert warning is not None
+    assert marker.is_file()
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    cli._sweep_private_snapshots(staging, delay_seconds=0)
+    assert snapshot.exists() is False
+    assert marker.exists() is False

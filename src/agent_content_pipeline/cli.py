@@ -106,6 +106,48 @@ def _verified_snapshot(
         raise typer.BadParameter(str(error), param_hint="--revision") from error
 
 
+def _remove_private_snapshot(
+    path: Path,
+    *,
+    attempts: int = 5,
+    delay_seconds: float = 0.2,
+) -> str | None:
+    """Remove a browser-upload snapshot, recording a safe later retry if Windows holds it."""
+
+    marker = path.with_suffix(path.suffix + ".cleanup-pending")
+    last_error: OSError | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            path.unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
+            return None
+        except OSError as error:
+            last_error = error
+            if attempt + 1 < max(1, attempts):
+                time.sleep(max(0, delay_seconds))
+    warning = f"private upload snapshot cleanup is pending: {path} ({last_error})"
+    try:
+        marker.write_text(path.name + "\n", encoding="utf-8")
+    except OSError as marker_error:
+        warning += f"; cleanup marker could not be written ({marker_error})"
+    return warning
+
+
+def _sweep_private_snapshots(
+    staging_root: Path,
+    *,
+    delay_seconds: float = 0.2,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    for marker in sorted(staging_root.glob("*.cleanup-pending")):
+        suffix = ".cleanup-pending"
+        target = Path(str(marker)[: -len(suffix)])
+        warning = _remove_private_snapshot(target, delay_seconds=delay_seconds)
+        if warning is not None:
+            warnings.append(warning)
+    return tuple(warnings)
+
+
 app = typer.Typer(
     name="acp",
     help="Create, render, and publish local content Products.",
@@ -1852,9 +1894,10 @@ def publish_social_video(
         project_root=project_root,
         chrome_path=configured_chrome,
     )
-    staging_path = (
-        product.root / "publish" / ".staging" / f"{uuid4()}-{platform.value}.mp4"
-    )
+    staging_root = product.root / "publish" / ".staging"
+    for cleanup_warning in _sweep_private_snapshots(staging_root):
+        typer.echo(f"WARNING: {cleanup_warning}", err=True)
+    staging_path = staging_root / f"{uuid4()}-{platform.value}.mp4"
     try:
         video_copy = workspace.copy_verified_file(
             product,
@@ -2004,10 +2047,9 @@ def publish_social_video(
                 code=3 if result.state == SocialPublicationState.WAITING_FOR_USER else 1
             )
     finally:
-        try:
-            video_copy.path.unlink(missing_ok=True)
-        except BaseException:
-            pass
+        cleanup_warning = _remove_private_snapshot(video_copy.path)
+        if cleanup_warning is not None:
+            typer.echo(f"WARNING: {cleanup_warning}", err=True)
 
 
 @product_app.command("create")
