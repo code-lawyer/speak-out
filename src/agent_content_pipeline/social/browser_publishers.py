@@ -18,7 +18,12 @@ class BrowserPage(Protocol):
     def navigate(self, url: str) -> None: ...
     def exists(self, selector: str) -> bool: ...
     def fill(self, selector: str, value: str) -> None: ...
-    def fill_tags(self, selector: str, tags: Sequence[str]) -> bool: ...
+    def fill_tags(
+        self,
+        selector: str,
+        tags: Sequence[str],
+        chip_selectors: Sequence[str],
+    ) -> bool: ...
     def set_files(self, selector: str, paths: Sequence[Path]) -> None: ...
     def evaluate(self, expression: str) -> Any: ...
 
@@ -31,6 +36,10 @@ class PlatformUiContract:
     title_inputs: tuple[str, ...]
     body_inputs: tuple[str, ...]
     tag_inputs: tuple[str, ...]
+    tag_chips: tuple[str, ...]
+    category_controls: tuple[str, ...]
+    category_options: tuple[str, ...]
+    category_selected_values: tuple[str, ...]
     login_markers: tuple[str, ...]
     submit_texts: tuple[str, ...]
     success_texts: tuple[str, ...]
@@ -44,6 +53,10 @@ CONTRACTS = {
         title_inputs=("input[placeholder*='标题']", "input.d-text"),
         body_inputs=("div[contenteditable=true]", "textarea[placeholder*='正文']"),
         tag_inputs=(),
+        tag_chips=(),
+        category_controls=(),
+        category_options=(),
+        category_selected_values=(),
         login_markers=(".login-container", "[class*='login'] canvas"),
         submit_texts=("发布",),
         success_texts=("发布成功", "提交成功"),
@@ -55,6 +68,10 @@ CONTRACTS = {
         title_inputs=("input[placeholder*='标题']", "input[placeholder*='作品标题']"),
         body_inputs=("div[contenteditable=true]", "textarea[placeholder*='描述']"),
         tag_inputs=(),
+        tag_chips=(),
+        category_controls=(),
+        category_options=(),
+        category_selected_values=(),
         login_markers=("[class*='login']", "[class*='qrcode']"),
         submit_texts=("发布", "立即发布"),
         success_texts=("发布成功", "投稿成功"),
@@ -69,6 +86,30 @@ CONTRACTS = {
             "input[placeholder*='标签']",
             ".tag-input input",
             "input[placeholder*='Enter']",
+        ),
+        tag_chips=(
+            "[data-tag]",
+            "[class*='tag-item']:has([class*='close'])",
+            "[class*='tag-item']:has([class*='delete'])",
+            "[class*='tag']:has(button[aria-label*='删除'])",
+        ),
+        category_controls=(
+            "[class*='partition'] [role=combobox]",
+            "[class*='partition'] [class*='select']",
+            "[class*='type'] [role=combobox]",
+            "[class*='type'] [class*='select']",
+        ),
+        category_options=(
+            "[role=listbox] [role=option]",
+            "[class*='dropdown'] [class*='option']",
+            ".bcc-select-dropdown li",
+        ),
+        category_selected_values=(
+            "input",
+            "[aria-selected='true']",
+            "[class*='selected']",
+            "[class*='selection']",
+            "[class*='value']",
         ),
         login_markers=(".login-tip", "[class*='login']"),
         submit_texts=("立即投稿", "投稿"),
@@ -164,7 +205,7 @@ class VisibleChromePlatformPublisher:
                     state=SocialPublicationState.FAILED,
                     message="approved bilibili tags were not submitted because the tag control is missing",
                 )
-            if not page.fill_tags(tag_input, spec.tags):
+            if not page.fill_tags(tag_input, spec.tags, self.contract.tag_chips):
                 return SocialPublishResult(
                     platform=spec.platform,
                     state=SocialPublicationState.FAILED,
@@ -180,7 +221,7 @@ class VisibleChromePlatformPublisher:
         if (
             spec.platform == SocialPlatform.BILIBILI
             and spec.category
-            and not self._select_text(page, spec.category)
+            and not self._select_category(page, spec.category)
         ):
             return SocialPublishResult(
                 platform=spec.platform,
@@ -246,42 +287,77 @@ class VisibleChromePlatformPublisher:
             )
         )
 
-    def _select_text(self, page: BrowserPage, text: str) -> bool:
+    def _select_category(self, page: BrowserPage, text: str) -> bool:
+        control_selector = self._wait_for_any(
+            page,
+            self.contract.category_controls,
+            self._editor_timeout_seconds,
+        )
+        if control_selector is None:
+            return False
         clicked = bool(
             page.evaluate(
                 """
 (() => {
-  const wanted = %s;
-  const node = [...document.querySelectorAll('[role=option],li,span')]
-    .find(item => {
-      const rect = item.getBoundingClientRect();
-      return item.textContent.trim() === wanted && rect.width > 0 && rect.height > 0;
-    });
-  if (!node) return false;
-  node.click();
+  const control = document.querySelector(%s);
+  if (!control) return false;
+  const rect = control.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  control.click();
   return true;
 })()
 """.strip()
-                % json.dumps(text, ensure_ascii=False)
+                % json.dumps(control_selector)
             )
         )
         if not clicked:
             return False
-        verification = """
+        choose_option = """
 (() => {
   const wanted = %s;
-  const selectedCandidates = [...document.querySelectorAll(
-    '[aria-selected="true"],[class*="selected" i],[class*="active" i],'
-      + '[role=combobox],input,[class*="select" i],[class*="category" i],'
-      + '[class*="partition" i]'
+  const normalize = value => value.replace(/\\s+/g, ' ').trim();
+  const optionSelectors = %s;
+  const options = optionSelectors.flatMap(selector => [...document.querySelectorAll(selector)]);
+  const option = options.find(node => {
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0
+      && normalize(node.textContent || '') === normalize(wanted);
+  });
+  if (!option) return false;
+  option.click();
+  return true;
+})()
+""".strip() % (
+            json.dumps(text, ensure_ascii=False),
+            json.dumps(list(self.contract.category_options), ensure_ascii=False),
+        )
+        deadline = time.monotonic() + min(self._editor_timeout_seconds, 5)
+        while time.monotonic() < deadline:
+            if bool(page.evaluate(choose_option)):
+                break
+            time.sleep(0.2)
+        else:
+            return False
+        verification = """
+(() => {
+  const control = document.querySelector(%s);
+  if (!control) return false;
+  const wanted = %s;
+  const normalize = value => value.replace(/\\s+/g, ' ').trim();
+  const selectedSelectors = %s;
+  const selectedValues = [control, ...selectedSelectors.flatMap(
+    selector => [...control.querySelectorAll(selector)]
   )];
-  return selectedCandidates.some(node => {
-    const value = node instanceof HTMLInputElement ? node.value.trim() : '';
-    const text = (node.textContent || '').trim();
-    return value === wanted || text === wanted || text.includes(wanted);
+  return selectedValues.some(node => {
+    const value = node instanceof HTMLInputElement ? node.value : node.textContent || '';
+    return normalize(value) === normalize(wanted);
   });
 })()
-""".strip() % json.dumps(text, ensure_ascii=False)
+""".strip() % (
+            json.dumps(control_selector),
+            json.dumps(text, ensure_ascii=False),
+            json.dumps(list(self.contract.category_selected_values), ensure_ascii=False),
+        )
         deadline = time.monotonic() + min(self._editor_timeout_seconds, 5)
         while time.monotonic() < deadline:
             if bool(page.evaluate(verification)):

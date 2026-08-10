@@ -34,7 +34,7 @@ Create and load a Product, add immutable artifact revisions, and resolve the sel
 
 ### Pipeline
 
-Advance a Product through validated stages, enforce approvals, run independent branches, and return a structured run result. It owns ordering rules and retry selection.
+Advance a Product through validated stages, enforce approvals, run independent branches, and return a structured run result. For article publication it verifies the selected sealed revisions itself and constructs the outbound spec from those exact files; callers cannot pair an approved digest with unrelated bytes. It owns ordering rules and retry selection.
 
 ### ArticlePublisher
 
@@ -46,7 +46,7 @@ Accept an approved video specification and produce inspected output artifacts. T
 
 ### BrowserDriver
 
-Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction, upload, download, and user-intervention primitives. The default Adapter uses local Chrome 116+ and CDP, can reconnect to an existing platform Profile, and can explicitly close only that dedicated session.
+Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction, upload, download, and user-intervention primitives. The default Adapter uses local Chrome 116+ and CDP, retries transient probes before declaring an existing Profile stale, cleans up a newly launched process on failure or user interruption, and can explicitly close only that dedicated session.
 
 ### PlatformPublisher
 

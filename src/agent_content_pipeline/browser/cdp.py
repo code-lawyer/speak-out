@@ -144,7 +144,12 @@ class ChromePageController:
 """.strip()
         self.evaluate(expression)
 
-    def fill_tags(self, selector: str, tags: Sequence[str]) -> bool:
+    def fill_tags(
+        self,
+        selector: str,
+        tags: Sequence[str],
+        chip_selectors: Sequence[str],
+    ) -> bool:
         expression = f"""
 (() => {{
   const element = document.querySelector({json.dumps(selector)});
@@ -170,11 +175,19 @@ class ChromePageController:
 (() => {{
   const element = document.querySelector({json.dumps(selector)});
   if (!(element instanceof HTMLInputElement)) return false;
-  const scope = element.closest('[class*="tag" i]')
-    || element.parentElement?.parentElement
-    || element.parentElement;
-  const text = scope?.innerText || scope?.textContent || '';
-  return {json.dumps(list(tags), ensure_ascii=False)}.every(tag => text.includes(tag));
+  const scope = element.closest('[class*="tag" i]');
+  if (!scope) return false;
+  const normalize = value => value
+    .replace(/[×✕]/g, '')
+    .replace(/删除/g, '')
+    .replace(/\\s+/g, ' ')
+    .trim();
+  const chipSelectors = {json.dumps(list(chip_selectors), ensure_ascii=False)};
+  const chips = chipSelectors.flatMap(selector => [...scope.querySelectorAll(selector)])
+    .map(node => normalize(node.getAttribute('data-tag') || node.textContent || ''));
+  return {json.dumps(list(tags), ensure_ascii=False)}
+    .map(normalize)
+    .every(tag => chips.includes(tag));
 }})()
 """.strip()
         deadline = time.monotonic() + 5

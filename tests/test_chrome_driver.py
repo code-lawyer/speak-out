@@ -145,6 +145,70 @@ def test_chrome_driver_retries_transient_cdp_probe_until_browser_is_ready(tmp_pa
     assert process.terminated is False
 
 
+def test_chrome_driver_retries_existing_profile_probe_without_relaunching(tmp_path):
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"exe")
+    profile = tmp_path / ".local" / "browser-profiles" / "bilibili"
+    profile.mkdir(parents=True)
+    (profile / "DevToolsActivePort").write_text("53123\n/devtools/browser/abc\n")
+    attempts = 0
+
+    def http(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("briefly unavailable", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "Browser": "Chrome/140.0.0.0",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:53123/devtools/browser/abc",
+            },
+            request=request,
+        )
+
+    def must_not_launch(command):
+        raise AssertionError("existing dedicated Chrome must be reused")
+
+    session = LocalChromeCdpDriver(
+        project_root=tmp_path,
+        chrome_path=chrome,
+        process_launcher=must_not_launch,
+        http_client=httpx.Client(transport=httpx.MockTransport(http)),
+    ).launch(platform="bilibili", start_url="https://example.com/upload")
+
+    assert session.port == 53123
+    assert attempts == 2
+
+
+def test_chrome_driver_cleans_up_new_process_when_user_interrupts_startup(tmp_path):
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"exe")
+    process = FakeProcess()
+
+    def launch(command):
+        profile_arg = next(item for item in command if item.startswith("--user-data-dir="))
+        profile = Path(profile_arg.split("=", 1)[1])
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / "DevToolsActivePort").write_text("53123\n/devtools/browser/abc\n")
+        return process
+
+    def interrupt(request: httpx.Request) -> httpx.Response:
+        raise KeyboardInterrupt()
+
+    driver = LocalChromeCdpDriver(
+        project_root=tmp_path,
+        chrome_path=chrome,
+        process_launcher=launch,
+        http_client=httpx.Client(transport=httpx.MockTransport(interrupt)),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        driver.launch(platform="bilibili", start_url="https://example.com/upload")
+
+    assert process.terminated is True
+
+
 def test_chrome_driver_closes_only_the_requested_dedicated_session(tmp_path):
     chrome = tmp_path / "chrome.exe"
     chrome.write_bytes(b"exe")

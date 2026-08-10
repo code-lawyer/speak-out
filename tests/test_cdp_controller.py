@@ -32,7 +32,11 @@ def test_page_controller_uses_cdp_for_visible_form_and_file_interactions(tmp_pat
     assert page.exists("input[type=file]") is True
     page.set_files("input[type=file]", [video])
     page.fill("input[name=title]", "测试标题")
-    assert page.fill_tags("input[name=tag]", ["AI", "未来"]) is True
+    assert page.fill_tags(
+        "input[name=tag]",
+        ["AI", "未来"],
+        ["[data-tag]", "[class*='tag-item']:has([class*='close'])"],
+    ) is True
     page.click("button.submit")
 
     methods = [item[0] for item in cdp.calls]
@@ -49,4 +53,10 @@ def test_page_controller_uses_cdp_for_visible_form_and_file_interactions(tmp_pat
     assert "AI" in tag_call[1]["expression"]
     assert "未来" in tag_call[1]["expression"]
     assert "Enter" in tag_call[1]["expression"]
+    verification_call = next(
+        item
+        for item in cdp.calls
+        if item[0] == "Runtime.evaluate" and "chipSelectors" in item[1]["expression"]
+    )
+    assert "data-tag" in verification_call[1]["expression"]
     assert all(item[2] == "session-1" for item in cdp.calls[2:])

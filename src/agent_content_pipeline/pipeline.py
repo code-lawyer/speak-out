@@ -4,30 +4,22 @@ import hashlib
 import json
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from .publishing.article import (
+    ArticleValidationError,
     ArticlePublicationSpec,
     ArticlePublishPreview,
     ArticlePublishResult,
 )
-from .state import ApprovalLedger, ApprovalScope, PublicationLedger
+from .state import ApprovalLedger, ApprovalScope, PublicationLedger, PublicationRecordState
 from .social.models import SocialPlatform
+from .validation import validate_article_bundle
+from .workspace import ArtifactKind, Product, ProductWorkspace
 
 
 class ArticlePublisher(Protocol):
     def preview(self, spec: ArticlePublicationSpec) -> ArticlePublishPreview: ...
 
     def publish(self, preview: ArticlePublishPreview) -> ArticlePublishResult: ...
-
-
-class ArticlePublicationEvidence(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    article_revision: str = Field(pattern=r"^v\d{3,}$")
-    article_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    cover_revision: str = Field(pattern=r"^v\d{3,}$")
-    cover_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class ApprovalRequired(RuntimeError):
@@ -108,32 +100,75 @@ def _approval_content_digest(*parts: str) -> str:
 class ArticlePublicationWorkflow:
     """Enforce durable approvals before crossing the ArticlePublisher seam."""
 
-    def __init__(self, approvals: ApprovalLedger, publisher: ArticlePublisher) -> None:
+    def __init__(
+        self,
+        approvals: ApprovalLedger,
+        publisher: ArticlePublisher,
+        workspace: ProductWorkspace,
+        product: Product,
+    ) -> None:
         self._approvals = approvals
         self._publisher = publisher
+        self._workspace = workspace
+        self._product = product
         self._publications = PublicationLedger(approvals.product_root)
 
     def publish(
         self,
-        spec: ArticlePublicationSpec,
         *,
-        evidence: ArticlePublicationEvidence,
+        article_revision: str,
+        cover_revision: str,
+        target_slug: str | None = None,
+        push_to_wechat: bool = True,
     ) -> ArticlePublishResult:
+        article = self._workspace.verify_revision(
+            self._product,
+            ArtifactKind.ARTICLE,
+            article_revision,
+        )
+        cover = self._workspace.verify_revision(
+            self._product,
+            ArtifactKind.COVER,
+            cover_revision,
+        )
+        if article.digest is None or cover.digest is None:
+            raise RuntimeError("verified publication artifacts must have content digests")
+        markdown = (article.root / "article.mdx").read_text(encoding="utf-8")
+        body_html = (article.root / "body.html").read_text(encoding="utf-8")
+        wechat_html = (article.root / "index.html").read_text(encoding="utf-8")
+        cover_png = (cover.root / "cover.png").read_bytes()
+        validation_issues = validate_article_bundle(
+            markdown,
+            body_html,
+            wechat_html,
+            cover_png,
+        )
+        if validation_issues:
+            raise ArticleValidationError(validation_issues)
+        destination_slug = target_slug or self._product.manifest.slug
+        spec = ArticlePublicationSpec(
+            markdown=markdown,
+            source_slug=self._product.manifest.slug,
+            target_slug=destination_slug,
+            wechat_html=wechat_html,
+            cover_png=cover_png,
+            push_to_wechat=push_to_wechat,
+        )
         publication_key = article_publication_approval_key(
-            evidence.article_revision,
-            evidence.cover_revision,
+            article_revision,
+            cover_revision,
             spec.target_slug,
             spec.push_to_wechat,
         )
         publication_digest = article_publication_content_digest(
-            evidence.article_digest,
-            evidence.cover_digest,
+            article.digest,
+            cover.digest,
             spec.target_slug,
             spec.push_to_wechat,
         )
         requirements = (
-            (ApprovalScope.ARTICLE, evidence.article_revision, evidence.article_digest),
-            (ApprovalScope.COVER, evidence.cover_revision, evidence.cover_digest),
+            (ApprovalScope.ARTICLE, article_revision, article.digest),
+            (ApprovalScope.COVER, cover_revision, cover.digest),
             (ApprovalScope.ARTICLE_PUBLICATION, publication_key, publication_digest),
         )
         missing = tuple(
@@ -156,5 +191,5 @@ class ArticlePublicationWorkflow:
             preview = self._publisher.preview(spec)
             attempt.mark_external_started()
             result = self._publisher.publish(preview)
-            attempt.finish(result.state.value)
+            attempt.finish(PublicationRecordState(result.state.value))
             return result

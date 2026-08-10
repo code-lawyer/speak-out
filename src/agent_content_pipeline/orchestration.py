@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .state import PublicationLedger, StageAttemptLedger, StageState
+from .state import PublicationLedger, PublicationRecordState, StageAttemptLedger, StageState
 from .security import redact_sensitive_data
 
 
@@ -338,7 +338,11 @@ class PipelineOrchestrator:
             succeeded_state = "submitted"
         else:
             return
-        state = "failed" if outcome == ReconciliationOutcome.ABSENT else succeeded_state
+        state = (
+            PublicationRecordState.FAILED
+            if outcome == ReconciliationOutcome.ABSENT
+            else PublicationRecordState(succeeded_state)
+        )
         PublicationLedger(self._ledger.state_path.parent).record_state(
             destination,
             idempotency_key,

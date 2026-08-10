@@ -206,7 +206,7 @@ class LocalChromeCdpDriver:
                 f"{self._startup_timeout_seconds:g}s"
                 + (f"; launcher exit code: {exit_code}" if exit_code is not None else "")
             )
-        except Exception:
+        except BaseException:
             self._stop_launched_process(platform, process)
             raise
 
@@ -228,29 +228,35 @@ class LocalChromeCdpDriver:
     ) -> ChromeSession | None:
         if not active_port_path.is_file():
             return None
-        try:
-            lines = active_port_path.read_text(encoding="utf-8").splitlines()
-            if not lines or not lines[0].isdigit():
-                return None
-            port = int(lines[0])
-            version = self._http_client.get(
-                f"http://127.0.0.1:{port}/json/version",
-                timeout=1,
-            )
-            version.raise_for_status()
-            version_payload = version.json()
-            self._validate_browser_version(version_payload)
-            websocket_url = version_payload.get("webSocketDebuggerUrl")
-            if not websocket_url:
-                return None
-            return ChromeSession(
-                platform=platform,
-                profile_root=profile_root,
-                port=port,
-                websocket_url=websocket_url,
-            )
-        except (OSError, ValueError, httpx.HTTPError):
-            return None
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                lines = active_port_path.read_text(encoding="utf-8").splitlines()
+                if not lines or not lines[0].isdigit():
+                    return None
+                port = int(lines[0])
+                version = self._http_client.get(
+                    f"http://127.0.0.1:{port}/json/version",
+                    timeout=1,
+                )
+                version.raise_for_status()
+                version_payload = version.json()
+                self._validate_browser_version(version_payload)
+                websocket_url = version_payload.get("webSocketDebuggerUrl")
+                if websocket_url:
+                    return ChromeSession(
+                        platform=platform,
+                        profile_root=profile_root,
+                        port=port,
+                        websocket_url=websocket_url,
+                    )
+            except (OSError, ValueError, httpx.HTTPError):
+                pass
+            if process := self._processes.get(platform):
+                if process.poll() is not None:
+                    return None
+            time.sleep(0.1)
+        return None
 
     @staticmethod
     def _validate_browser_version(version_payload: dict[str, object]) -> None:

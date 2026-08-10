@@ -31,6 +31,16 @@ class StageState(StrEnum):
     BLOCKED = "blocked"
 
 
+class PublicationRecordState(StrEnum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    SUBMITTED = "submitted"
+    FAILED = "failed"
+    WAITING_FOR_USER = "waiting_for_user"
+    PARTIAL = "partial"
+    UNKNOWN = "unknown"
+
+
 class ApprovalRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -48,7 +58,7 @@ class PublicationClaim(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     acquired: bool
-    prior_state: str | None = None
+    prior_state: PublicationRecordState | None = None
 
 
 class PublicationAttempt:
@@ -76,13 +86,17 @@ class PublicationAttempt:
     def mark_external_started(self) -> None:
         self._external_started = True
 
-    def finish(self, state: str) -> None:
+    def finish(self, state: PublicationRecordState) -> None:
         self.ledger.record_state(self.destination, self.idempotency_key, state)
         self._finished = True
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
         if not self._finished:
-            fallback = "unknown" if self._external_started else "failed"
+            fallback = (
+                PublicationRecordState.UNKNOWN
+                if self._external_started
+                else PublicationRecordState.FAILED
+            )
             self.ledger.record_state(self.destination, self.idempotency_key, fallback)
         return False
 
@@ -206,7 +220,11 @@ class PublicationLedger:
     def __init__(self, product_root: Path | str) -> None:
         self.state_path = Path(product_root) / "state.sqlite3"
 
-    def get_state(self, destination: str, idempotency_key: str) -> str | None:
+    def get_state(
+        self,
+        destination: str,
+        idempotency_key: str,
+    ) -> PublicationRecordState | None:
         if not self.state_path.is_file():
             return None
         with sqlite3.connect(self.state_path) as connection:
@@ -218,14 +236,16 @@ class PublicationLedger:
                 """,
                 (destination, idempotency_key),
             ).fetchone()
-        return row[0] if row else None
+        return PublicationRecordState(row[0]) if row else None
 
     def claim(
         self,
         destination: str,
         idempotency_key: str,
         *,
-        retryable_states: frozenset[str] = frozenset(("failed", "waiting_for_user")),
+        retryable_states: frozenset[PublicationRecordState] = frozenset(
+            (PublicationRecordState.FAILED, PublicationRecordState.WAITING_FOR_USER)
+        ),
     ) -> PublicationClaim:
         """Atomically reserve one external publication before crossing its seam."""
 
@@ -250,7 +270,7 @@ class PublicationLedger:
                     (
                         destination,
                         idempotency_key,
-                        "running",
+                        PublicationRecordState.RUNNING.value,
                         datetime.now(UTC).isoformat(),
                     ),
                 )
@@ -263,7 +283,7 @@ class PublicationLedger:
                     WHERE destination = ? AND idempotency_key = ? AND state = ?
                     """,
                     (
-                        "running",
+                        PublicationRecordState.RUNNING.value,
                         datetime.now(UTC).isoformat(),
                         destination,
                         idempotency_key,
@@ -281,7 +301,9 @@ class PublicationLedger:
         destination: str,
         idempotency_key: str,
         *,
-        retryable_states: frozenset[str] = frozenset(("failed", "waiting_for_user")),
+        retryable_states: frozenset[PublicationRecordState] = frozenset(
+            (PublicationRecordState.FAILED, PublicationRecordState.WAITING_FOR_USER)
+        ),
     ) -> PublicationAttempt:
         return PublicationAttempt(
             self,
@@ -294,7 +316,13 @@ class PublicationLedger:
             ),
         )
 
-    def record_state(self, destination: str, idempotency_key: str, state: str) -> None:
+    def record_state(
+        self,
+        destination: str,
+        idempotency_key: str,
+        state: PublicationRecordState,
+    ) -> None:
+        state = PublicationRecordState(state)
         with sqlite3.connect(self.state_path) as connection:
             self._initialize(connection)
             connection.execute(
@@ -304,7 +332,7 @@ class PublicationLedger:
                 ON CONFLICT(destination, idempotency_key)
                 DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
                 """,
-                (destination, idempotency_key, state, datetime.now(UTC).isoformat()),
+                (destination, idempotency_key, state.value, datetime.now(UTC).isoformat()),
             )
 
     def list(self) -> list[dict[str, str]]:

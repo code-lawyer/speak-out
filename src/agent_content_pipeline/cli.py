@@ -18,7 +18,6 @@ from .config import LocalConfig
 from .diagnostics import SystemDoctor
 from .pipeline import (
     ArticlePublicationWorkflow,
-    ArticlePublicationEvidence,
     article_publication_content_digest,
     article_publication_approval_key,
     social_publication_content_digest,
@@ -39,7 +38,14 @@ from .orchestration import (
     RetryNotAllowed,
     StageCommand,
 )
-from .state import ApprovalLedger, ApprovalScope, PublicationLedger, StageAttemptLedger, StageState
+from .state import (
+    ApprovalLedger,
+    ApprovalScope,
+    PublicationLedger,
+    PublicationRecordState,
+    StageAttemptLedger,
+    StageState,
+)
 from .validation import (
     validate_article_bundle,
     validate_article_documents,
@@ -413,14 +419,16 @@ def publish_article(
         publication_digest,
     ):
         raise typer.BadParameter("exact article publication approval is missing")
-    result = ArticlePublicationWorkflow(ApprovalLedger(product.root), publisher).publish(
-        spec,
-        evidence=ArticlePublicationEvidence(
-            article_revision=article_revision,
-            article_digest=article.digest,
-            cover_revision=cover_revision,
-            cover_digest=cover.digest,
-        ),
+    result = ArticlePublicationWorkflow(
+        ApprovalLedger(product.root),
+        publisher,
+        workspace,
+        product,
+    ).publish(
+        article_revision=article_revision,
+        cover_revision=cover_revision,
+        target_slug=destination_slug,
+        push_to_wechat=True,
     )
     channels = interpret_article_result(result)
     log_path = write_article_publish_log(product.root, preview, result, channels)
@@ -1862,7 +1870,7 @@ def publish_social_video(
                             f"reconcile before retrying ({type(error).__name__})"
                         ),
                     )
-            attempt.finish(result.state.value)
+            attempt.finish(PublicationRecordState(result.state.value))
     finally:
         if page is not None and result.state != SocialPublicationState.SUBMITTED:
             candidate = product.root / "logs" / (

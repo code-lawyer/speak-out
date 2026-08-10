@@ -32,6 +32,9 @@ class FakePage:
             or "简介" in selector
             or "tag" in selector
             or "标签" in selector
+            or "partition" in selector
+            or "combobox" in selector
+            or "select" in selector
         ):
             return self.logged_in
         return False
@@ -42,13 +45,18 @@ class FakePage:
     def set_files(self, selector, paths):
         self.files.extend(paths)
 
-    def fill_tags(self, selector, tags):
+    def fill_tags(self, selector, tags, chip_selectors):
+        assert chip_selectors
         self.tags.extend(tags)
         return True
 
     def evaluate(self, expression):
         if "button.click" in expression:
             self.submit_clicked = True
+            return True
+        if "control.click" in expression or "option.click" in expression:
+            return True
+        if "selectedValues" in expression:
             return True
         if "document.body.innerText" in expression:
             return self.confirms
@@ -121,7 +129,7 @@ def test_bilibili_publisher_never_submits_when_approved_category_cannot_be_selec
 ):
     class MissingCategoryPage(FakePage):
         def evaluate(self, expression):
-            if "wanted" in expression:
+            if "option.click" in expression:
                 return False
             return super().evaluate(expression)
 
@@ -141,7 +149,7 @@ def test_bilibili_publisher_never_submits_when_selected_category_cannot_be_verif
 ):
     class UnverifiedCategoryPage(FakePage):
         def evaluate(self, expression):
-            if "selectedCandidates" in expression:
+            if "selectedValues" in expression:
                 return False
             return super().evaluate(expression)
 
@@ -158,7 +166,7 @@ def test_bilibili_publisher_never_submits_when_selected_category_cannot_be_verif
 
 def test_bilibili_publisher_never_submits_when_tag_chips_cannot_be_verified(tmp_path):
     class RejectedTagsPage(FakePage):
-        def fill_tags(self, selector, tags):
+        def fill_tags(self, selector, tags, chip_selectors):
             self.tags.extend(tags)
             return False
 
