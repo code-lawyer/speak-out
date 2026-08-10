@@ -18,6 +18,7 @@ class BrowserPage(Protocol):
     def navigate(self, url: str) -> None: ...
     def exists(self, selector: str) -> bool: ...
     def fill(self, selector: str, value: str) -> None: ...
+    def fill_tags(self, selector: str, tags: Sequence[str]) -> None: ...
     def set_files(self, selector: str, paths: Sequence[Path]) -> None: ...
     def evaluate(self, expression: str) -> Any: ...
 
@@ -29,6 +30,7 @@ class PlatformUiContract:
     file_inputs: tuple[str, ...]
     title_inputs: tuple[str, ...]
     body_inputs: tuple[str, ...]
+    tag_inputs: tuple[str, ...]
     login_markers: tuple[str, ...]
     submit_texts: tuple[str, ...]
     success_texts: tuple[str, ...]
@@ -41,6 +43,7 @@ CONTRACTS = {
         file_inputs=("input[type=file][accept*='video']", "input[type=file]"),
         title_inputs=("input[placeholder*='标题']", "input.d-text"),
         body_inputs=("div[contenteditable=true]", "textarea[placeholder*='正文']"),
+        tag_inputs=(),
         login_markers=(".login-container", "[class*='login'] canvas"),
         submit_texts=("发布",),
         success_texts=("发布成功", "提交成功"),
@@ -51,6 +54,7 @@ CONTRACTS = {
         file_inputs=("input[type=file][accept*='video']", "input[type=file]"),
         title_inputs=("input[placeholder*='标题']", "input[placeholder*='作品标题']"),
         body_inputs=("div[contenteditable=true]", "textarea[placeholder*='描述']"),
+        tag_inputs=(),
         login_markers=("[class*='login']", "[class*='qrcode']"),
         submit_texts=("发布", "立即发布"),
         success_texts=("发布成功", "投稿成功"),
@@ -61,6 +65,11 @@ CONTRACTS = {
         file_inputs=("input[type=file][accept*='video']", "input[type=file]"),
         title_inputs=("input[placeholder*='标题']", ".video-title input"),
         body_inputs=("textarea[placeholder*='简介']", "div[contenteditable=true]"),
+        tag_inputs=(
+            "input[placeholder*='标签']",
+            ".tag-input input",
+            "input[placeholder*='Enter']",
+        ),
         login_markers=(".login-tip", "[class*='login']"),
         submit_texts=("立即投稿", "投稿"),
         success_texts=("投稿成功", "稿件投递成功"),
@@ -71,9 +80,15 @@ CONTRACTS = {
 class VisibleChromePlatformPublisher:
     """Shared synchronous submit flow; selectors stay in one replaceable contract."""
 
-    def __init__(self, platform: SocialPlatform, confirmation_timeout_seconds: float = 60) -> None:
+    def __init__(
+        self,
+        platform: SocialPlatform,
+        confirmation_timeout_seconds: float = 60,
+        editor_timeout_seconds: float = 120,
+    ) -> None:
         self.contract = CONTRACTS[platform]
         self._confirmation_timeout_seconds = confirmation_timeout_seconds
+        self._editor_timeout_seconds = editor_timeout_seconds
 
     def publish(self, page: BrowserPage, spec: SocialPostSpec) -> SocialPublishResult:
         if spec.platform != self.contract.platform:
@@ -113,26 +128,66 @@ class VisibleChromePlatformPublisher:
             )
 
         page.set_files(file_input, [spec.video_path])
-        title_input = self._wait_for_any(page, self.contract.title_inputs, 120)
-        body_input = self._first_existing(page, self.contract.body_inputs)
+        title_input = self._wait_for_any(
+            page,
+            self.contract.title_inputs,
+            self._editor_timeout_seconds,
+        )
         if title_input is None:
             return SocialPublishResult(
                 platform=spec.platform,
                 state=SocialPublicationState.UNKNOWN,
                 message="video upload started but the title editor did not become available",
             )
+        body_input = self._wait_for_any(
+            page,
+            self.contract.body_inputs,
+            self._editor_timeout_seconds,
+        )
+        if body_input is None:
+            return SocialPublishResult(
+                platform=spec.platform,
+                state=SocialPublicationState.FAILED,
+                message="approved body and tags were not submitted because the body control is missing",
+            )
         page.fill(title_input, spec.title)
-        if body_input:
+        if spec.platform == SocialPlatform.BILIBILI:
+            page.fill(body_input, spec.body.strip())
+            tag_input = self._wait_for_any(
+                page,
+                self.contract.tag_inputs,
+                self._editor_timeout_seconds,
+            )
+            if tag_input is None:
+                return SocialPublishResult(
+                    platform=spec.platform,
+                    state=SocialPublicationState.FAILED,
+                    message="approved bilibili tags were not submitted because the tag control is missing",
+                )
+            page.fill_tags(tag_input, spec.tags)
+        else:
             topics = " ".join(f"#{tag.lstrip('#')}" for tag in spec.tags)
             body = " ".join(part for part in (spec.body.strip(), topics) if part)
             page.fill(body_input, body)
-        if spec.platform == SocialPlatform.BILIBILI and spec.category:
-            self._select_text(page, spec.category)
+        if (
+            spec.platform == SocialPlatform.BILIBILI
+            and spec.category
+            and not self._select_text(page, spec.category)
+        ):
+            return SocialPublishResult(
+                platform=spec.platform,
+                state=SocialPublicationState.FAILED,
+                message="approved bilibili category could not be selected; publication was not submitted",
+            )
         if not self._click_text(page, self.contract.submit_texts):
             return SocialPublishResult(
                 platform=spec.platform,
                 state=SocialPublicationState.WAITING_FOR_USER,
-                message="metadata is filled; review required options and click publish in the visible window",
+                message=(
+                    "metadata is filled but required options still need attention; "
+                    "do not click publish, complete the options in the visible window, "
+                    "then retry only this platform stage"
+                ),
             )
         if self._wait_for_text(page, self.contract.success_texts):
             return SocialPublishResult(

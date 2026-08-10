@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 from enum import StrEnum
@@ -11,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from .state import PublicationLedger, StageAttemptLedger, StageState
+from .security import redact_sensitive_data
 
 
 class StageCommand(BaseModel):
@@ -70,19 +70,7 @@ class ReconciliationNotAllowed(RuntimeError):
     pass
 
 
-def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: (
-                "[REDACTED]"
-                if re.search(r"(?:secret|token|password|authorization|cookie|base64)", key, re.IGNORECASE)
-                else _redact(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
-    return value
+_redact = redact_sensitive_data
 
 
 class PipelineOrchestrator:

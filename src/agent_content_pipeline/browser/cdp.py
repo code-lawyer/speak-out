@@ -144,6 +144,29 @@ class ChromePageController:
 """.strip()
         self.evaluate(expression)
 
+    def fill_tags(self, selector: str, tags: Sequence[str]) -> None:
+        expression = f"""
+(() => {{
+  const element = document.querySelector({json.dumps(selector)});
+  if (!(element instanceof HTMLInputElement)) throw new Error('tag input not found');
+  const tags = {json.dumps(list(tags), ensure_ascii=False)};
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  for (const tag of tags) {{
+    setter.call(element, tag);
+    element.dispatchEvent(new Event('input', {{bubbles: true}}));
+    element.dispatchEvent(new Event('change', {{bubbles: true}}));
+    element.dispatchEvent(new KeyboardEvent('keydown', {{
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+    }}));
+    element.dispatchEvent(new KeyboardEvent('keyup', {{
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+    }}));
+  }}
+  return true;
+}})()
+""".strip()
+        self.evaluate(expression)
+
     def set_files(self, selector: str, paths: Sequence[Path]) -> None:
         root = self._cdp.command(
             "DOM.getDocument",

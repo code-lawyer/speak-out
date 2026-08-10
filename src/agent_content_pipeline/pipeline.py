@@ -128,10 +128,11 @@ class ArticlePublicationWorkflow:
             raise ApprovalRequired(missing)
 
         destination = "website-wechat"
-        prior_state = self._publications.get_state(destination, publication_key)
+        claim = self._publications.claim(destination, publication_key)
+        prior_state = claim.prior_state
         if prior_state == "succeeded":
             raise AlreadyPublished(destination, publication_key)
-        if prior_state in {"partial", "unknown"}:
+        if not claim.acquired:
             raise UnsafeToRetry(destination, publication_key, prior_state)
 
         result = self._publisher.publish(self._publisher.preview(spec))

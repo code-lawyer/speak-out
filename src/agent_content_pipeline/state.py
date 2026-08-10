@@ -44,6 +44,13 @@ class ApprovalRecord(BaseModel):
     approved_at: datetime
 
 
+class PublicationClaim(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    acquired: bool
+    prior_state: str | None = None
+
+
 class ApprovalLedger:
     """Persist approval for an exact artifact revision inside a Product."""
 
@@ -176,6 +183,62 @@ class PublicationLedger:
                 (destination, idempotency_key),
             ).fetchone()
         return row[0] if row else None
+
+    def claim(
+        self,
+        destination: str,
+        idempotency_key: str,
+        *,
+        retryable_states: frozenset[str] = frozenset(("failed", "waiting_for_user")),
+    ) -> PublicationClaim:
+        """Atomically reserve one external publication before crossing its seam."""
+
+        with sqlite3.connect(self.state_path, timeout=30, isolation_level=None) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._initialize(connection)
+            row = connection.execute(
+                """
+                SELECT state FROM publication_results
+                WHERE destination = ? AND idempotency_key = ?
+                """,
+                (destination, idempotency_key),
+            ).fetchone()
+            prior_state = row[0] if row else None
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO publication_results(
+                        destination, idempotency_key, state, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        destination,
+                        idempotency_key,
+                        "running",
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
+                acquired = True
+            elif prior_state in retryable_states:
+                connection.execute(
+                    """
+                    UPDATE publication_results
+                    SET state = ?, updated_at = ?
+                    WHERE destination = ? AND idempotency_key = ? AND state = ?
+                    """,
+                    (
+                        "running",
+                        datetime.now(UTC).isoformat(),
+                        destination,
+                        idempotency_key,
+                        prior_state,
+                    ),
+                )
+                acquired = connection.total_changes == 1
+            else:
+                acquired = False
+            connection.execute("COMMIT")
+        return PublicationClaim(acquired=acquired, prior_state=prior_state)
 
     def record_state(self, destination: str, idempotency_key: str, state: str) -> None:
         with sqlite3.connect(self.state_path) as connection:

@@ -15,7 +15,7 @@ Use the Agent for editorial and creative work. Use the `acp` CLI for determinist
 4. Keep every artifact inside the returned Product directory.
 5. Never read secret values into the conversation. Ask the user to edit `.local/secrets.toml` themselves when configuration is missing.
 
-Run `uv run acp doctor --project-root .` before the first Product. If the maintainer is migrating the old article Skill, use `acp config migrate-legacy-article`; it copies the proven local VPS settings without printing them or changing the VPS.
+Run `uv run acp doctor --project-root .` before the first Product. Treat an unignored `.local/` directory or Chrome older than 116 as a hard stop. If the maintainer is migrating the old article Skill, use `acp config migrate-legacy-article`; it copies the proven local VPS settings without printing them or changing the VPS.
 
 Read [content-contract.md](references/content-contract.md) before creating article, cover, or video artifacts. Read [approval-policy.md](references/approval-policy.md) before any validation, publication, retry, or recovery action.
 
@@ -65,11 +65,12 @@ Pass `--allow-edge-tts-data-transfer` only after the user explicitly accepts tha
 - Treat timeouts after submission as unknown. Query status before retrying.
 - Never replay website or WeChat publication during a social-platform retry.
 - Record `video` approval for the exact render, then use `acp social approve-publication` separately for each platform. `acp social publish` automatically opens or reconnects to that platform's dedicated Chrome Profile.
-- If the CLI returns `waiting_for_user`, leave the visible window open, ask the user to complete login or required options, then use `acp retry` for only that platform stage.
+- If the CLI returns `waiting_for_user`, do not click Publish. Leave the visible window open, ask the user to complete login or required options only, then use `acp retry` for only that platform stage. The Adapter never reports `waiting_for_user` after clicking Publish.
 - If the CLI returns `unknown`, stop. Do not click publish again until the platform page or account proves the first submission was absent.
+- When browser work is finished, use `acp social close --project-root ... --platform ...`; it closes only that platform's dedicated Profile session.
 - After the user personally verifies an `unknown` or interrupted action, use dry-run `acp reconcile` with a non-secret evidence note. Apply it only with `--execute --confirmed-by-user`. Never reconcile `partial` as absent.
 
-Every new revision is hash-sealed. If integrity validation fails, create a new revision; never edit or reseal an already sealed revision. For a legacy revision with no manifest, use `acp artifact seal-legacy` only after the user confirms the current bytes are the intended baseline; sealing does not grant approval.
+Every new revision is hash-sealed. If integrity validation fails, create a new revision; never edit or reseal an already sealed revision. For a legacy revision with no manifest, use `acp artifact seal-legacy` only after the user confirms the current bytes are the intended baseline; sealing does not grant approval or bypass current article/cover validation.
 
 ## Hard stops
 

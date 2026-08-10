@@ -198,6 +198,44 @@ chrome_path = "C:/fake/chrome.exe"
     assert json.loads(dry_run.stdout)["state"] == "planned"
     assert driver_calls == []
 
+    bilibili_key = social_publication_approval_key(
+        "v001",
+        "v001",
+        SocialPlatform.BILIBILI,
+    )
+    PublicationLedger(product.root).record_state(
+        "social:bilibili",
+        bilibili_key,
+        "running",
+    )
+    contended = CliRunner().invoke(
+        app,
+        [
+            "social",
+            "publish",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--platform",
+            "bilibili",
+            "--video-revision",
+            "v001",
+            "--copy-revision",
+            "v001",
+            "--execute",
+            "--json",
+        ],
+    )
+    assert contended.exit_code != 0
+    assert "running" in contended.output
+    assert driver_calls == []
+    PublicationLedger(product.root).record_state(
+        "social:bilibili",
+        bilibili_key,
+        "failed",
+    )
+
     result = CliRunner().invoke(
         app,
         [
@@ -260,3 +298,55 @@ chrome_path = "C:/fake/chrome.exe"
         "social:douyin",
         social_publication_approval_key("v001", "v001", SocialPlatform.DOUYIN),
     ) == "unknown"
+
+
+def test_social_close_only_closes_the_platform_dedicated_profile(tmp_path, monkeypatch):
+    local = tmp_path / ".local"
+    local.mkdir()
+    (local / "secrets.toml").write_text(
+        """
+[website_wechat]
+endpoint = "https://example.com/api/articles"
+bearer_token = "unused"
+
+[browser]
+chrome_path = "C:/fake/chrome.exe"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    closed: list[str] = []
+
+    class FakeSession:
+        platform = "bilibili"
+        profile_root = tmp_path / ".local" / "browser-profiles" / "bilibili"
+
+    class FakeDriver:
+        def __init__(self, *, project_root, chrome_path):
+            assert project_root == tmp_path
+            assert chrome_path == Path("C:/fake/chrome.exe")
+
+        def connect_existing(self, *, platform):
+            assert platform == "bilibili"
+            return FakeSession()
+
+        def close(self, session):
+            closed.append(session.platform)
+
+    monkeypatch.setattr(cli, "LocalChromeCdpDriver", FakeDriver)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "social",
+            "close",
+            "--project-root",
+            str(tmp_path),
+            "--platform",
+            "bilibili",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["browser"] == "closed"
+    assert closed == ["bilibili"]

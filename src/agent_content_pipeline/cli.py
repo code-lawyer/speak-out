@@ -40,10 +40,9 @@ from .orchestration import (
 )
 from .state import ApprovalLedger, ApprovalScope, PublicationLedger, StageAttemptLedger, StageState
 from .validation import (
-    validate_article_release,
+    validate_article_bundle,
+    validate_article_documents,
     validate_png_cover,
-    validate_release_links,
-    validate_release_markers,
 )
 from .video.spec import VideoScriptSpec
 from .video.materials import PexelsMaterialSource
@@ -167,9 +166,12 @@ def preview_article(
     article_root = product.root / "article" / article_revision
     cover_root = product.root / "cover" / cover_revision
     markdown = (article_root / "article.mdx").read_text(encoding="utf-8")
-    (article_root / "body.html").read_text(encoding="utf-8")
+    body_html = (article_root / "body.html").read_text(encoding="utf-8")
     wechat_html = (article_root / "index.html").read_text(encoding="utf-8")
     cover_png = (cover_root / "cover.png").read_bytes()
+    issues = validate_article_bundle(markdown, body_html, wechat_html, cover_png)
+    if issues:
+        raise typer.BadParameter("; ".join(issues), param_hint="--article-revision")
 
     website = LocalConfig(project_root).load().website_wechat
     publisher = FixedIpVpsPublisher(
@@ -238,6 +240,17 @@ def approve_article_publication(
         article_revision,
     )
     cover = _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
+    validation_issues = validate_article_bundle(
+        (article.root / "article.mdx").read_text(encoding="utf-8"),
+        (article.root / "body.html").read_text(encoding="utf-8"),
+        (article.root / "index.html").read_text(encoding="utf-8"),
+        (cover.root / "cover.png").read_bytes(),
+    )
+    if validation_issues:
+        raise typer.BadParameter(
+            "; ".join(validation_issues),
+            param_hint="--article-revision",
+        )
     approvals = ApprovalLedger(product.root)
     missing_artifact_approvals = []
     if not approvals.has(ApprovalScope.ARTICLE, article_revision, article.digest):
@@ -322,12 +335,19 @@ def publish_article(
     cover = _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
     article_root = article.root
     cover_root = cover.root
+    markdown = (article_root / "article.mdx").read_text(encoding="utf-8")
+    body_html = (article_root / "body.html").read_text(encoding="utf-8")
+    wechat_html = (article_root / "index.html").read_text(encoding="utf-8")
+    cover_png = (cover_root / "cover.png").read_bytes()
+    issues = validate_article_bundle(markdown, body_html, wechat_html, cover_png)
+    if issues:
+        raise typer.BadParameter("; ".join(issues), param_hint="--article-revision")
     spec = ArticlePublicationSpec(
-        markdown=(article_root / "article.mdx").read_text(encoding="utf-8"),
+        markdown=markdown,
         source_slug=product.manifest.slug,
         target_slug=destination_slug,
-        wechat_html=(article_root / "index.html").read_text(encoding="utf-8"),
-        cover_png=(cover_root / "cover.png").read_bytes(),
+        wechat_html=wechat_html,
+        cover_png=cover_png,
         push_to_wechat=True,
     )
     website = LocalConfig(project_root).load().website_wechat
@@ -361,7 +381,7 @@ def publish_article(
             if not approvals.has(scope, revision, digest)
         ]
         prior = PublicationLedger(product.root).get_state("website-wechat", key)
-        blocked = bool(missing or prior in {"succeeded", "partial", "unknown"})
+        blocked = bool(missing or prior in {"succeeded", "partial", "unknown", "running"})
         payload = {
             "ok": not blocked,
             "mode": "dry-run",
@@ -548,6 +568,14 @@ def _build_stage_commands(
             ):
                 blockers.append(f"missing exact approval: cover:{cover_revision}")
             if article is not None and cover is not None:
+                blockers.extend(
+                    validate_article_bundle(
+                        (article.root / "article.mdx").read_text(encoding="utf-8"),
+                        (article.root / "body.html").read_text(encoding="utf-8"),
+                        (article.root / "index.html").read_text(encoding="utf-8"),
+                        (cover.root / "cover.png").read_bytes(),
+                    )
+                )
                 publication_digest = article_publication_content_digest(
                     article.digest,
                     cover.digest,
@@ -565,7 +593,7 @@ def _build_stage_commands(
             prior_publication = publications.get_state("website-wechat", key)
             if prior_publication == "succeeded":
                 blockers.append("website/WeChat publication already succeeded")
-            elif prior_publication in {"partial", "unknown"}:
+            elif prior_publication in {"partial", "unknown", "running"}:
                 blockers.append(
                     f"website/WeChat prior state is {prior_publication}; reconcile before retry"
                 )
@@ -708,6 +736,8 @@ def _build_stage_commands(
             elif prior_publication in {
                 SocialPublicationState.UNKNOWN.value,
                 SocialPublicationState.WAITING_FOR_USER.value,
+                "partial",
+                "running",
             }:
                 blockers.append(
                     f"{platform.value} prior state is {prior_publication}; "
@@ -940,11 +970,7 @@ def add_article_revision(
     mdx_text = mdx_bytes.decode("utf-8")
     body_text = body_bytes.decode("utf-8")
     wechat_text = wechat_bytes.decode("utf-8")
-    issues = validate_release_markers(mdx_text, body_text, wechat_text)
-    if not issues:
-        issues = validate_release_links(mdx_text, body_text, wechat_text)
-    if not issues:
-        issues = validate_article_release(mdx_text, body_text)
+    issues = validate_article_documents(mdx_text, body_text, wechat_text)
     if issues:
         raise typer.BadParameter("; ".join(issues), param_hint="--mdx")
     workspace = ProductWorkspace(product_root.parent)
@@ -1654,6 +1680,35 @@ def social_login_status(
     typer.echo(f"{platform.value}: {state}")
 
 
+@social_app.command("close")
+def close_social_browser(
+    project_root: Annotated[Path, typer.Option(help="Project repository root.")] = Path("."),
+    platform: Annotated[SocialPlatform, typer.Option(help="Platform profile to close.")] = SocialPlatform.BILIBILI,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    settings = LocalConfig(project_root).load()
+    configured_chrome = Path(settings.browser.chrome_path) if settings.browser.chrome_path else None
+    driver = LocalChromeCdpDriver(
+        project_root=project_root,
+        chrome_path=configured_chrome,
+    )
+    session = driver.connect_existing(platform=platform.value)
+    state = "already-closed"
+    if session is not None:
+        driver.close(session)
+        state = "closed"
+    payload = {
+        "ok": True,
+        "platform": platform.value,
+        "profile": str(project_root / ".local" / "browser-profiles" / platform.value),
+        "browser": state,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    typer.echo(f"{platform.value}: {state}")
+
+
 @social_app.command("publish")
 def publish_social_video(
     project_root: Annotated[Path, typer.Option(help="Project repository root.")],
@@ -1701,9 +1756,14 @@ def publish_social_video(
     prior = publications.get_state(destination, key)
     if prior == SocialPublicationState.SUBMITTED.value:
         raise typer.BadParameter(f"publication already submitted: {destination}:{key}")
-    if prior == SocialPublicationState.UNKNOWN.value:
+    if prior in {
+        SocialPublicationState.UNKNOWN.value,
+        "partial",
+        "running",
+    }:
         raise typer.BadParameter(
-            f"prior publication state is unknown; reconcile before retrying: {destination}:{key}"
+            f"prior publication state is {prior}; reconcile before retrying: "
+            f"{destination}:{key}"
         )
 
     video_path = video_artifact.root / "output" / "final.mp4"
@@ -1755,6 +1815,12 @@ def publish_social_video(
         project_root=project_root,
         chrome_path=configured_chrome,
     )
+    claim = publications.claim(destination, key)
+    if not claim.acquired:
+        raise typer.BadParameter(
+            f"publication is already claimed with state {claim.prior_state}: "
+            f"{destination}:{key}"
+        )
     session = driver.launch(platform=platform.value, start_url=contract.upload_url)
     cdp = CdpWebSocketClient(session.websocket_url)
     timestamp = datetime.now(UTC)

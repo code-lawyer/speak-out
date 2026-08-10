@@ -123,6 +123,32 @@ def test_article_publish_timeout_is_unknown_instead_of_safe_to_retry():
     assert result.error == "request timed out; remote publish state is unknown"
 
 
+def test_article_publish_response_disconnect_is_unknown_instead_of_safe_to_retry():
+    def disconnect(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("response connection was lost", request=request)
+
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="local-test-secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(disconnect)),
+    )
+    preview = publisher.preview(
+        ArticlePublicationSpec(
+            markdown="---\ntitle: test\n---\nbody\n",
+            source_slug="test-article",
+            target_slug="test-article",
+            wechat_html="<p>test</p>",
+            cover_png=b"png",
+            push_to_wechat=True,
+        )
+    )
+
+    result = publisher.publish(preview)
+
+    assert result.state == "unknown"
+    assert result.error == "request connection was lost; remote publish state is unknown"
+
+
 def test_http_200_without_explicit_business_success_is_unknown():
     def ambiguous(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"message": "accepted"}, request=request)
@@ -146,6 +172,62 @@ def test_http_200_without_explicit_business_success_is_unknown():
     result = publisher.publish(preview)
 
     assert result.state == "unknown"
+
+
+def test_server_error_without_explicit_business_result_is_unknown():
+    def ambiguous_gateway(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="bad gateway", request=request)
+
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(ambiguous_gateway)),
+    )
+    preview = publisher.preview(
+        ArticlePublicationSpec(
+            markdown="---\ntitle: test\n---\nbody\n",
+            source_slug="test-article",
+            target_slug="test-article",
+            wechat_html="<p>test</p>",
+            cover_png=b"png",
+            push_to_wechat=True,
+        )
+    )
+
+    result = publisher.publish(preview)
+
+    assert result.state == "unknown"
+    assert result.http_status == 502
+
+
+def test_non_json_response_body_is_not_exposed_in_result_or_logs():
+    def private_error(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            502,
+            text="Set-Cookie: session=private-cookie-value",
+            request=request,
+        )
+
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(private_error)),
+    )
+    preview = publisher.preview(
+        ArticlePublicationSpec(
+            markdown="---\ntitle: test\n---\nbody\n",
+            source_slug="test-article",
+            target_slug="test-article",
+            wechat_html="<p>test</p>",
+            cover_png=b"png",
+            push_to_wechat=True,
+        )
+    )
+
+    result = publisher.publish(preview)
+
+    assert result.response == {"raw": "[NON-JSON RESPONSE OMITTED]"}
+    assert "private-cookie-value" not in result.model_dump_json()
 
 
 def test_site_success_with_explicit_wechat_failure_is_partial():

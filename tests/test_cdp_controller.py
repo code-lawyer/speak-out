@@ -32,12 +32,17 @@ def test_page_controller_uses_cdp_for_visible_form_and_file_interactions(tmp_pat
     assert page.exists("input[type=file]") is True
     page.set_files("input[type=file]", [video])
     page.fill("input[name=title]", "测试标题")
+    page.fill_tags("input[name=tag]", ["AI", "未来"])
     page.click("button.submit")
 
     methods = [item[0] for item in cdp.calls]
     assert "Page.navigate" in methods
     assert "DOM.setFileInputFiles" in methods
-    assert methods.count("Runtime.evaluate") == 3
+    assert methods.count("Runtime.evaluate") == 4
     set_files = next(item for item in cdp.calls if item[0] == "DOM.setFileInputFiles")
     assert set_files[1]["files"] == [str(video.resolve())]
+    tag_call = [item for item in cdp.calls if item[0] == "Runtime.evaluate"][-2]
+    assert "AI" in tag_call[1]["expression"]
+    assert "未来" in tag_call[1]["expression"]
+    assert "Enter" in tag_call[1]["expression"]
     assert all(item[2] == "session-1" for item in cdp.calls[2:])

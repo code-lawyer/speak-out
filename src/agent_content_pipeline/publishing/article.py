@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -10,6 +9,8 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+
+from ..security import redact_sensitive_data
 
 
 class ArticlePublicationSpec(BaseModel):
@@ -73,19 +74,7 @@ def interpret_article_result(result: ArticlePublishResult) -> ArticleChannelRepo
     return ArticleChannelReport(site=site, cover="unknown", wechat="unknown")
 
 
-def redact_publication_data(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: (
-                "[REDACTED]"
-                if re.search(r"(?:secret|token|password|authorization|base64)", key, re.IGNORECASE)
-                else redact_publication_data(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact_publication_data(item) for item in value]
-    return value
+redact_publication_data = redact_sensitive_data
 
 
 def write_article_publish_log(
@@ -179,11 +168,18 @@ class FixedIpVpsPublisher:
                 state=PublicationState.UNKNOWN,
                 error="request timed out; remote publish state is unknown",
             )
+        except httpx.RequestError:
+            return ArticlePublishResult(
+                state=PublicationState.UNKNOWN,
+                error="request connection was lost; remote publish state is unknown",
+            )
         try:
             response_body = response.json()
         except ValueError:
-            response_body = {"raw": response.text}
-        if not response.is_success or response_body.get("success") is False:
+            response_body = {"raw": "[NON-JSON RESPONSE OMITTED]"}
+        if response.status_code >= 500:
+            state = PublicationState.UNKNOWN
+        elif not response.is_success or response_body.get("success") is False:
             state = PublicationState.FAILED
         elif response_body.get("success") is not True:
             state = PublicationState.UNKNOWN

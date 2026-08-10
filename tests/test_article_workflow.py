@@ -1,5 +1,7 @@
 import httpx
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 
 from agent_content_pipeline.pipeline import (
     AlreadyPublished,
@@ -133,4 +135,66 @@ def test_pipeline_never_blindly_retries_partial_article_publication(tmp_path):
         workflow.publish(spec, article_revision="v001", cover_revision="v001")
 
     assert error.value.prior_state == "partial"
+    assert calls == 1
+
+
+def test_concurrent_agents_cannot_claim_the_same_article_publication(tmp_path):
+    entered_remote = Event()
+    release_remote = Event()
+    call_lock = Lock()
+    calls = 0
+
+    def succeed(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            entered_remote.set()
+            assert release_remote.wait(timeout=5)
+        return httpx.Response(
+            200,
+            json={"success": True, "wechatPushed": True},
+            request=request,
+        )
+
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(succeed)),
+    )
+    approvals = ApprovalLedger(tmp_path)
+    approvals.record(ApprovalScope.ARTICLE, "v001")
+    approvals.record(ApprovalScope.COVER, "v001")
+    approvals.record(
+        ApprovalScope.ARTICLE_PUBLICATION,
+        article_publication_approval_key("v001", "v001", "test-article", True),
+    )
+    first = ArticlePublicationWorkflow(approvals, publisher)
+    second = ArticlePublicationWorkflow(approvals, publisher)
+    spec = ArticlePublicationSpec(
+        markdown="---\ntitle: 斩我斋：测试文章\n---\n正文\n",
+        source_slug="test-article",
+        target_slug="test-article",
+        wechat_html="<p>测试</p>",
+        cover_png=b"png",
+        push_to_wechat=True,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first_result = executor.submit(
+            first.publish,
+            spec,
+            article_revision="v001",
+            cover_revision="v001",
+        )
+        assert entered_remote.wait(timeout=5)
+        try:
+            with pytest.raises(UnsafeToRetry) as error:
+                second.publish(spec, article_revision="v001", cover_revision="v001")
+            assert error.value.prior_state == "running"
+        finally:
+            release_remote.set()
+        assert first_result.result(timeout=5).state == "succeeded"
+
     assert calls == 1

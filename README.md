@@ -87,7 +87,7 @@ uv run acp social approve-publication --product <product> --platform bilibili --
 uv run acp social publish --project-root . --product <product> --platform bilibili --video-revision v001 --copy-revision v001 --execute
 ```
 
-Use `xiaohongshu` or `douyin` for the other first-release targets. A visible local Chrome window opens automatically. If login is required, the command stops with `waiting_for_user`; complete login in that window and use the stage-specific `acp retry` flow below. The dedicated Profile remains under `.local/browser-profiles/<platform>/`.
+Use `xiaohongshu` or `douyin` for the other first-release targets. A visible local Chrome 116+ window opens automatically. If login or required options need attention, the command stops before clicking Publish with `waiting_for_user`; complete those items in the window and use the stage-specific `acp retry` flow below. The dedicated Profile remains under `.local/browser-profiles/<platform>/`. Close only that platform session with `uv run acp social close --project-root . --platform <platform>`.
 
 ## Safe orchestration
 

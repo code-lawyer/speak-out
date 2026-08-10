@@ -145,6 +145,39 @@ def validate_article_release(markdown: str, wechat_body: str) -> tuple[str, ...]
     return tuple(issues)
 
 
+def validate_article_documents(
+    markdown: str,
+    wechat_body: str,
+    wechat_html: str,
+) -> tuple[str, ...]:
+    """Validate the exact website and WeChat bytes consumed by publication."""
+
+    marker_issues = validate_release_markers(markdown, wechat_body, wechat_html)
+    if marker_issues:
+        return marker_issues
+    link_issues = validate_release_links(markdown, wechat_body, wechat_html)
+    if link_issues:
+        return link_issues
+    issues = [*validate_article_release(markdown, wechat_body)]
+    if re.search(r"<img\b", wechat_html, re.IGNORECASE):
+        issues.append("index.html article body must not contain images")
+    if wechat_body.strip() not in wechat_html:
+        issues.append("index.html must contain the exact approved body.html")
+    return tuple(dict.fromkeys(issues))
+
+
+def validate_article_bundle(
+    markdown: str,
+    wechat_body: str,
+    wechat_html: str,
+    cover_png: bytes,
+) -> tuple[str, ...]:
+    return (
+        *validate_article_documents(markdown, wechat_body, wechat_html),
+        *validate_png_cover(cover_png),
+    )
+
+
 def validate_png_cover(buffer: bytes) -> tuple[str, ...]:
     issues: list[str] = []
     signature = bytes((137, 80, 78, 71, 13, 10, 26, 10))

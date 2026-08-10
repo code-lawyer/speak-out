@@ -12,7 +12,7 @@ The user explicitly chose one plaintext, editable `.local/secrets.toml` file ins
 
 ## Browser profiles
 
-Each platform uses a dedicated Chrome Profile under `.local/browser-profiles/`. The program must state which site will open and what login state will be retained before launching Chrome. The user's default Chrome Profile is out of scope.
+Each platform uses a dedicated Chrome Profile under `.local/browser-profiles/`. The program must state which site will open and what login state will be retained before launching Chrome. Chrome 116 or newer is required and checked by `acp doctor` and again over CDP. `acp social close` closes only the selected dedicated Profile session. The user's default Chrome Profile is out of scope.
 
 Failed or uncertain browser publication may save a diagnostic screenshot under the ignored Product `logs/` directory. It can contain visible account-page information, so it must remain local and must not be attached to public issues without review.
 
@@ -26,7 +26,7 @@ The CLI requires `--allow-edge-tts-data-transfer` before constructing the online
 
 Article publication sends the approved MDX, WeChat HTML, and cover to the configured VPS. Social publication exposes only the approved MP4 and platform copy to the selected creator page in visible Chrome.
 
-Every artifact revision is sealed with a local SHA-256 manifest. Artifact and publication approvals retain the associated content digest. A missing or changed file blocks later approval or execution. Legacy revisions require an explicit seal operation and must then be approved normally.
+Every artifact revision is sealed with a local SHA-256 manifest. Artifact and publication approvals retain the associated content digest. A missing or changed file blocks later approval or execution. Legacy revisions require an explicit seal operation and must then be approved normally. A valid legacy hash is not treated as content validity: the exact MDX, WeChat body/full HTML, and PNG bytes are revalidated before preview, publication approval, preflight, and execution.
 
 ## Reporting
 

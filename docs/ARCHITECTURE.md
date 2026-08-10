@@ -24,7 +24,7 @@ Pipeline Module
 
 The Product is the durable aggregate. Its user-readable `product.toml` identifies the Product. Revision directories contain `.artifact.json` SHA-256 manifests; SQLite approvals retain the content digest of the exact artifact or publication bundle. SQLite also records independent publication results, run IDs, stage attempts, exact replay commands, append-only reconciliation evidence, and redacted results.
 
-Every side-effecting stage uses an idempotency key derived from Product ID, artifact revision, destination, and intended action. A successful publication is terminal unless the user explicitly creates a new revision or duplicate-publication override.
+Every side-effecting stage uses an idempotency key derived from Product ID, artifact revision, destination, and intended action. Immediately before an external publication, SQLite takes a `BEGIN IMMEDIATE` transaction and atomically claims that destination/key as `running`; concurrent Agents therefore cannot both cross the same publication seam. A successful publication is terminal unless the user explicitly creates a new revision or duplicate-publication override.
 
 ## Module Interfaces
 
@@ -46,7 +46,7 @@ Accept an approved video specification and produce inspected output artifacts. T
 
 ### BrowserDriver
 
-Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction, upload, download, and user-intervention primitives. The default Adapter uses local Chrome and CDP.
+Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction, upload, download, and user-intervention primitives. The default Adapter uses local Chrome 116+ and CDP, can reconnect to an existing platform Profile, and can explicitly close only that dedicated session.
 
 ### PlatformPublisher
 
@@ -62,7 +62,7 @@ Direct or substantial upstream reuse must retain copyright and MIT notices in so
 
 ## Failure model
 
-Stage plans and attempts use `planned`, `running`, `waiting_for_user`, `succeeded`, `failed`, `partial`, `unknown`, `skipped`, and `blocked`. A network timeout after an external request is `unknown`, not `failed`, until reconciliation proves whether the destination accepted it. `partial` means a compound destination proved only part of its contract—for example, the website succeeded but WeChat draft creation failed.
+Stage plans and attempts use `planned`, `running`, `waiting_for_user`, `succeeded`, `failed`, `partial`, `unknown`, `skipped`, and `blocked`. A timeout, connection loss, or unstructured server error after an external request is `unknown`, not `failed`, until reconciliation proves whether the destination accepted it. `partial` means a compound destination proved only part of its contract—for example, the website succeeded but WeChat draft creation failed.
 
 Website/WeChat, rendering, and each social platform are separate publication domains. Success in one domain never implies success in another and is never rolled back by another domain's failure.
 
