@@ -44,6 +44,7 @@ class FakePage:
 
     def fill_tags(self, selector, tags):
         self.tags.extend(tags)
+        return True
 
     def evaluate(self, expression):
         if "button.click" in expression:
@@ -132,6 +133,43 @@ def test_bilibili_publisher_never_submits_when_approved_category_cannot_be_selec
 
     assert result.state == SocialPublicationState.FAILED
     assert "category" in result.message
+    assert page.submit_clicked is False
+
+
+def test_bilibili_publisher_never_submits_when_selected_category_cannot_be_verified(
+    tmp_path,
+):
+    class UnverifiedCategoryPage(FakePage):
+        def evaluate(self, expression):
+            if "selectedCandidates" in expression:
+                return False
+            return super().evaluate(expression)
+
+    page = UnverifiedCategoryPage(logged_in=True)
+    result = VisibleChromePlatformPublisher(
+        SocialPlatform.BILIBILI,
+        editor_timeout_seconds=0.01,
+    ).publish(page, post(tmp_path, SocialPlatform.BILIBILI))
+
+    assert result.state == SocialPublicationState.FAILED
+    assert "category" in result.message
+    assert page.submit_clicked is False
+
+
+def test_bilibili_publisher_never_submits_when_tag_chips_cannot_be_verified(tmp_path):
+    class RejectedTagsPage(FakePage):
+        def fill_tags(self, selector, tags):
+            self.tags.extend(tags)
+            return False
+
+    page = RejectedTagsPage(logged_in=True)
+    result = VisibleChromePlatformPublisher(SocialPlatform.BILIBILI).publish(
+        page,
+        post(tmp_path, SocialPlatform.BILIBILI),
+    )
+
+    assert result.state == SocialPublicationState.FAILED
+    assert "tags" in result.message
     assert page.submit_clicked is False
 
 

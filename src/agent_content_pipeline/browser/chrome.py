@@ -21,6 +21,8 @@ class RunningProcess(Protocol):
     pid: int
 
     def poll(self) -> int | None: ...
+    def terminate(self) -> None: ...
+    def wait(self, timeout: float | None = None) -> int: ...
 
 
 class ChromeSession(BaseModel):
@@ -172,33 +174,41 @@ class LocalChromeCdpDriver:
         process = self._process_launcher(command)
         self._processes[platform] = process
         deadline = time.monotonic() + self._startup_timeout_seconds
-        while time.monotonic() < deadline:
-            if active_port_path.is_file():
-                lines = active_port_path.read_text(encoding="utf-8").splitlines()
-                if lines and lines[0].isdigit():
-                    port = int(lines[0])
-                    version = self._http_client.get(
-                        f"http://127.0.0.1:{port}/json/version",
-                        timeout=2,
-                    )
-                    version.raise_for_status()
-                    version_payload = version.json()
-                    self._validate_browser_version(version_payload)
-                    websocket_url = version_payload.get("webSocketDebuggerUrl")
-                    if websocket_url:
-                        return ChromeSession(
-                            platform=platform,
-                            profile_root=profile_root,
-                            port=port,
-                            websocket_url=websocket_url,
-                            process_id=process.pid,
-                        )
-            time.sleep(0.1)
-        exit_code = process.poll()
-        raise ChromeLaunchError(
-            f"Chrome did not expose DevToolsActivePort within {self._startup_timeout_seconds:g}s"
-            + (f"; launcher exit code: {exit_code}" if exit_code is not None else "")
-        )
+        try:
+            while time.monotonic() < deadline:
+                if active_port_path.is_file():
+                    try:
+                        lines = active_port_path.read_text(encoding="utf-8").splitlines()
+                        if lines and lines[0].isdigit():
+                            port = int(lines[0])
+                            version = self._http_client.get(
+                                f"http://127.0.0.1:{port}/json/version",
+                                timeout=2,
+                            )
+                            version.raise_for_status()
+                            version_payload = version.json()
+                            self._validate_browser_version(version_payload)
+                            websocket_url = version_payload.get("webSocketDebuggerUrl")
+                            if websocket_url:
+                                return ChromeSession(
+                                    platform=platform,
+                                    profile_root=profile_root,
+                                    port=port,
+                                    websocket_url=websocket_url,
+                                    process_id=process.pid,
+                                )
+                    except (OSError, ValueError, httpx.HTTPError):
+                        pass
+                time.sleep(0.1)
+            exit_code = process.poll()
+            raise ChromeLaunchError(
+                "Chrome did not expose a ready DevTools endpoint within "
+                f"{self._startup_timeout_seconds:g}s"
+                + (f"; launcher exit code: {exit_code}" if exit_code is not None else "")
+            )
+        except Exception:
+            self._stop_launched_process(platform, process)
+            raise
 
     def connect_existing(self, *, platform: str) -> ChromeSession | None:
         if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", platform) is None:
@@ -268,3 +278,13 @@ class LocalChromeCdpDriver:
             close = getattr(client, "close", None)
             if callable(close):
                 close()
+
+    def _stop_launched_process(self, platform: str, process: RunningProcess) -> None:
+        self._processes.pop(platform, None)
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass

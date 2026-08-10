@@ -144,7 +144,7 @@ class ChromePageController:
 """.strip()
         self.evaluate(expression)
 
-    def fill_tags(self, selector: str, tags: Sequence[str]) -> None:
+    def fill_tags(self, selector: str, tags: Sequence[str]) -> bool:
         expression = f"""
 (() => {{
   const element = document.querySelector({json.dumps(selector)});
@@ -166,6 +166,23 @@ class ChromePageController:
 }})()
 """.strip()
         self.evaluate(expression)
+        verification = f"""
+(() => {{
+  const element = document.querySelector({json.dumps(selector)});
+  if (!(element instanceof HTMLInputElement)) return false;
+  const scope = element.closest('[class*="tag" i]')
+    || element.parentElement?.parentElement
+    || element.parentElement;
+  const text = scope?.innerText || scope?.textContent || '';
+  return {json.dumps(list(tags), ensure_ascii=False)}.every(tag => text.includes(tag));
+}})()
+""".strip()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if bool(self.evaluate(verification)):
+                return True
+            time.sleep(0.2)
+        return False
 
     def set_files(self, selector: str, paths: Sequence[Path]) -> None:
         root = self._cdp.command(

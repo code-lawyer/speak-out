@@ -24,7 +24,7 @@ Pipeline Module
 
 The Product is the durable aggregate. Its user-readable `product.toml` identifies the Product. Revision directories contain `.artifact.json` SHA-256 manifests; SQLite approvals retain the content digest of the exact artifact or publication bundle. SQLite also records independent publication results, run IDs, stage attempts, exact replay commands, append-only reconciliation evidence, and redacted results.
 
-Every side-effecting stage uses an idempotency key derived from Product ID, artifact revision, destination, and intended action. Immediately before an external publication, SQLite takes a `BEGIN IMMEDIATE` transaction and atomically claims that destination/key as `running`; concurrent Agents therefore cannot both cross the same publication seam. A successful publication is terminal unless the user explicitly creates a new revision or duplicate-publication override.
+Every side-effecting stage uses an idempotency key derived from Product ID, artifact revision, destination, and intended action. Immediately before an external publication, SQLite takes a `BEGIN IMMEDIATE` transaction and atomically claims that destination/key as `running`; concurrent Agents therefore cannot both cross the same publication seam. A `PublicationAttempt` resolves every acquired claim: exceptions before the external seam become retryable `failed`, while exceptions after the seam begins become `unknown`. A successful publication is terminal unless the user explicitly creates a new revision or duplicate-publication override.
 
 ## Module Interfaces
 
@@ -50,7 +50,7 @@ Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction
 
 ### PlatformPublisher
 
-Validate platform metadata, confirm login, upload the approved MP4, submit immediate publication, and return a result. Each platform is an independent Adapter at this real seam.
+Validate platform metadata, confirm login, upload the approved MP4, submit immediate publication, and return a result. Required metadata must be read back from the anchored platform control before submission; Bilibili tag chips and the selected category are explicit examples. Each platform is an independent Adapter at this real seam.
 
 ## Upstream absorption
 

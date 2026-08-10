@@ -18,6 +18,7 @@ from .config import LocalConfig
 from .diagnostics import SystemDoctor
 from .pipeline import (
     ArticlePublicationWorkflow,
+    ArticlePublicationEvidence,
     article_publication_content_digest,
     article_publication_approval_key,
     social_publication_content_digest,
@@ -414,8 +415,12 @@ def publish_article(
         raise typer.BadParameter("exact article publication approval is missing")
     result = ArticlePublicationWorkflow(ApprovalLedger(product.root), publisher).publish(
         spec,
-        article_revision=article_revision,
-        cover_revision=cover_revision,
+        evidence=ArticlePublicationEvidence(
+            article_revision=article_revision,
+            article_digest=article.digest,
+            cover_revision=cover_revision,
+            cover_digest=cover.digest,
+        ),
     )
     channels = interpret_article_result(result)
     log_path = write_article_publish_log(product.root, preview, result, channels)
@@ -1815,12 +1820,6 @@ def publish_social_video(
         project_root=project_root,
         chrome_path=configured_chrome,
     )
-    claim = publications.claim(destination, key)
-    if not claim.acquired:
-        raise typer.BadParameter(
-            f"publication is already claimed with state {claim.prior_state}: "
-            f"{destination}:{key}"
-        )
     session = driver.launch(platform=platform.value, start_url=contract.upload_url)
     cdp = CdpWebSocketClient(session.websocket_url)
     timestamp = datetime.now(UTC)
@@ -1832,18 +1831,38 @@ def publish_social_video(
         message="browser automation did not complete; reconcile before retrying",
     )
     try:
-        try:
-            page = ChromePageController.attach(cdp)
-            result = VisibleChromePlatformPublisher(platform).publish(page, spec)
-        except Exception as error:
-            result = SocialPublishResult(
-                platform=platform,
-                state=SocialPublicationState.UNKNOWN,
-                message=(
-                    "browser automation was interrupted after opening the creator flow; "
-                    f"reconcile before retrying ({type(error).__name__})"
-                ),
+        attempt = publications.begin_attempt(destination, key)
+        if not attempt.claim.acquired:
+            raise typer.BadParameter(
+                f"publication is already claimed with state {attempt.claim.prior_state}: "
+                f"{destination}:{key}"
             )
+        with attempt:
+            try:
+                page = ChromePageController.attach(cdp)
+            except Exception as error:
+                result = SocialPublishResult(
+                    platform=platform,
+                    state=SocialPublicationState.FAILED,
+                    message=(
+                        "the local creator page could not be attached before publication; "
+                        f"this attempt is safe to retry ({type(error).__name__})"
+                    ),
+                )
+            else:
+                attempt.mark_external_started()
+                try:
+                    result = VisibleChromePlatformPublisher(platform).publish(page, spec)
+                except Exception as error:
+                    result = SocialPublishResult(
+                        platform=platform,
+                        state=SocialPublicationState.UNKNOWN,
+                        message=(
+                            "browser automation was interrupted after opening the creator flow; "
+                            f"reconcile before retrying ({type(error).__name__})"
+                        ),
+                    )
+            attempt.finish(result.state.value)
     finally:
         if page is not None and result.state != SocialPublicationState.SUBMITTED:
             candidate = product.root / "logs" / (
@@ -1859,7 +1878,6 @@ def publish_social_video(
         except Exception:
             pass
 
-    publications.record_state(destination, key, result.state.value)
     log_root = product.root / "logs"
     log_root.mkdir(exist_ok=True)
     log_path = log_root / (

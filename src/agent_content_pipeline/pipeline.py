@@ -4,6 +4,8 @@ import hashlib
 import json
 from typing import Protocol
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from .publishing.article import (
     ArticlePublicationSpec,
     ArticlePublishPreview,
@@ -17,6 +19,15 @@ class ArticlePublisher(Protocol):
     def preview(self, spec: ArticlePublicationSpec) -> ArticlePublishPreview: ...
 
     def publish(self, preview: ArticlePublishPreview) -> ArticlePublishResult: ...
+
+
+class ArticlePublicationEvidence(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    article_revision: str = Field(pattern=r"^v\d{3,}$")
+    article_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    cover_revision: str = Field(pattern=r"^v\d{3,}$")
+    cover_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class ApprovalRequired(RuntimeError):
@@ -105,36 +116,45 @@ class ArticlePublicationWorkflow:
     def publish(
         self,
         spec: ArticlePublicationSpec,
-        article_revision: str,
-        cover_revision: str,
+        *,
+        evidence: ArticlePublicationEvidence,
     ) -> ArticlePublishResult:
         publication_key = article_publication_approval_key(
-            article_revision,
-            cover_revision,
+            evidence.article_revision,
+            evidence.cover_revision,
+            spec.target_slug,
+            spec.push_to_wechat,
+        )
+        publication_digest = article_publication_content_digest(
+            evidence.article_digest,
+            evidence.cover_digest,
             spec.target_slug,
             spec.push_to_wechat,
         )
         requirements = (
-            (ApprovalScope.ARTICLE, article_revision),
-            (ApprovalScope.COVER, cover_revision),
-            (ApprovalScope.ARTICLE_PUBLICATION, publication_key),
+            (ApprovalScope.ARTICLE, evidence.article_revision, evidence.article_digest),
+            (ApprovalScope.COVER, evidence.cover_revision, evidence.cover_digest),
+            (ApprovalScope.ARTICLE_PUBLICATION, publication_key, publication_digest),
         )
         missing = tuple(
             f"{scope.value}:{revision}"
-            for scope, revision in requirements
-            if not self._approvals.has(scope, revision)
+            for scope, revision, digest in requirements
+            if not self._approvals.has(scope, revision, digest)
         )
         if missing:
             raise ApprovalRequired(missing)
 
         destination = "website-wechat"
-        claim = self._publications.claim(destination, publication_key)
-        prior_state = claim.prior_state
+        attempt = self._publications.begin_attempt(destination, publication_key)
+        prior_state = attempt.claim.prior_state
         if prior_state == "succeeded":
             raise AlreadyPublished(destination, publication_key)
-        if not claim.acquired:
+        if not attempt.claim.acquired:
             raise UnsafeToRetry(destination, publication_key, prior_state)
 
-        result = self._publisher.publish(self._publisher.preview(spec))
-        self._publications.record_state(destination, publication_key, result.state.value)
-        return result
+        with attempt:
+            preview = self._publisher.preview(spec)
+            attempt.mark_external_started()
+            result = self._publisher.publish(preview)
+            attempt.finish(result.state.value)
+            return result

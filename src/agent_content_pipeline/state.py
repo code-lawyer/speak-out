@@ -51,6 +51,42 @@ class PublicationClaim(BaseModel):
     prior_state: str | None = None
 
 
+class PublicationAttempt:
+    """Resolve an acquired publication claim on every exceptional exit."""
+
+    def __init__(
+        self,
+        ledger: PublicationLedger,
+        destination: str,
+        idempotency_key: str,
+        claim: PublicationClaim,
+    ) -> None:
+        self.ledger = ledger
+        self.destination = destination
+        self.idempotency_key = idempotency_key
+        self.claim = claim
+        self._external_started = False
+        self._finished = False
+
+    def __enter__(self) -> PublicationAttempt:
+        if not self.claim.acquired:
+            raise RuntimeError("cannot enter an unacquired publication attempt")
+        return self
+
+    def mark_external_started(self) -> None:
+        self._external_started = True
+
+    def finish(self, state: str) -> None:
+        self.ledger.record_state(self.destination, self.idempotency_key, state)
+        self._finished = True
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        if not self._finished:
+            fallback = "unknown" if self._external_started else "failed"
+            self.ledger.record_state(self.destination, self.idempotency_key, fallback)
+        return False
+
+
 class ApprovalLedger:
     """Persist approval for an exact artifact revision inside a Product."""
 
@@ -239,6 +275,24 @@ class PublicationLedger:
                 acquired = False
             connection.execute("COMMIT")
         return PublicationClaim(acquired=acquired, prior_state=prior_state)
+
+    def begin_attempt(
+        self,
+        destination: str,
+        idempotency_key: str,
+        *,
+        retryable_states: frozenset[str] = frozenset(("failed", "waiting_for_user")),
+    ) -> PublicationAttempt:
+        return PublicationAttempt(
+            self,
+            destination,
+            idempotency_key,
+            self.claim(
+                destination,
+                idempotency_key,
+                retryable_states=retryable_states,
+            ),
+        )
 
     def record_state(self, destination: str, idempotency_key: str, state: str) -> None:
         with sqlite3.connect(self.state_path) as connection:

@@ -18,7 +18,7 @@ class BrowserPage(Protocol):
     def navigate(self, url: str) -> None: ...
     def exists(self, selector: str) -> bool: ...
     def fill(self, selector: str, value: str) -> None: ...
-    def fill_tags(self, selector: str, tags: Sequence[str]) -> None: ...
+    def fill_tags(self, selector: str, tags: Sequence[str]) -> bool: ...
     def set_files(self, selector: str, paths: Sequence[Path]) -> None: ...
     def evaluate(self, expression: str) -> Any: ...
 
@@ -164,7 +164,15 @@ class VisibleChromePlatformPublisher:
                     state=SocialPublicationState.FAILED,
                     message="approved bilibili tags were not submitted because the tag control is missing",
                 )
-            page.fill_tags(tag_input, spec.tags)
+            if not page.fill_tags(tag_input, spec.tags):
+                return SocialPublishResult(
+                    platform=spec.platform,
+                    state=SocialPublicationState.FAILED,
+                    message=(
+                        "approved bilibili tags could not be verified in the tag control; "
+                        "publication was not submitted"
+                    ),
+                )
         else:
             topics = " ".join(f"#{tag.lstrip('#')}" for tag in spec.tags)
             body = " ".join(part for part in (spec.body.strip(), topics) if part)
@@ -238,15 +246,17 @@ class VisibleChromePlatformPublisher:
             )
         )
 
-    @staticmethod
-    def _select_text(page: BrowserPage, text: str) -> bool:
-        return bool(
+    def _select_text(self, page: BrowserPage, text: str) -> bool:
+        clicked = bool(
             page.evaluate(
                 """
 (() => {
   const wanted = %s;
   const node = [...document.querySelectorAll('[role=option],li,span')]
-    .find(item => item.textContent.trim() === wanted);
+    .find(item => {
+      const rect = item.getBoundingClientRect();
+      return item.textContent.trim() === wanted && rect.width > 0 && rect.height > 0;
+    });
   if (!node) return false;
   node.click();
   return true;
@@ -255,6 +265,29 @@ class VisibleChromePlatformPublisher:
                 % json.dumps(text, ensure_ascii=False)
             )
         )
+        if not clicked:
+            return False
+        verification = """
+(() => {
+  const wanted = %s;
+  const selectedCandidates = [...document.querySelectorAll(
+    '[aria-selected="true"],[class*="selected" i],[class*="active" i],'
+      + '[role=combobox],input,[class*="select" i],[class*="category" i],'
+      + '[class*="partition" i]'
+  )];
+  return selectedCandidates.some(node => {
+    const value = node instanceof HTMLInputElement ? node.value.trim() : '';
+    const text = (node.textContent || '').trim();
+    return value === wanted || text === wanted || text.includes(wanted);
+  });
+})()
+""".strip() % json.dumps(text, ensure_ascii=False)
+        deadline = time.monotonic() + min(self._editor_timeout_seconds, 5)
+        while time.monotonic() < deadline:
+            if bool(page.evaluate(verification)):
+                return True
+            time.sleep(0.2)
+        return False
 
     def _wait_for_text(self, page: BrowserPage, texts: Sequence[str]) -> bool:
         deadline = time.monotonic() + self._confirmation_timeout_seconds
