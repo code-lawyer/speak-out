@@ -24,7 +24,7 @@ A timeout or connection loss after an external request does not prove failure. M
 
 ## Orchestrated retry
 
-Start with `acp run` without `--execute`; it is a side-effect-free exact plan. After execution, inspect `acp product status --json` for each independent attempt.
+Start with `acp run` without `--execute`; it is a side-effect-free exact plan. A safe stage is `planned`; a stage with invalid or missing artifacts, missing exact approvals, missing Edge/Pexels transfer acknowledgement, or an unsafe prior state is `blocked` with explicit reasons. Never execute a blocked plan. After execution, inspect `acp product status --json` for each independent attempt.
 
 Use `acp retry` only for the latest `failed` or `waiting_for_user` attempt of the named stage. Never use it directly for `unknown`, `partial`, or successful outcomes. After the user checks the real destination, `acp reconcile` may append `absent` for `unknown` or interrupted work, or `succeeded` for `unknown`, interrupted, or partial work. It cannot turn `partial` into absent. Create and approve a new artifact revision when a genuinely new publication is intended.
 

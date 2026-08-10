@@ -88,6 +88,59 @@ def test_run_is_dry_by_default_and_returns_exact_commands(tmp_path):
     assert StageAttemptLedger(tmp_path).list_runs() == []
 
 
+def test_preflight_blockers_are_visible_and_never_execute(tmp_path):
+    executor = FakeExecutor([])
+    orchestrator = PipelineOrchestrator(StageAttemptLedger(tmp_path), executor)
+    command = StageCommand(
+        stage="video",
+        idempotency_key="video-key",
+        args=("video", "render"),
+        blockers=(
+            "missing exact approval: video-script:v001",
+            "Edge TTS data-transfer approval is required",
+        ),
+    )
+
+    preview = orchestrator.run([command], execute=False)
+
+    assert preview.stages[0].state == StageState.BLOCKED
+    assert preview.stages[0].output["blockers"] == list(command.blockers)
+    executed = orchestrator.run([command], execute=True)
+    assert executed.stages[0].state == StageState.BLOCKED
+    assert executor.calls == []
+    assert StageAttemptLedger(tmp_path).list() == []
+    assert StageAttemptLedger(tmp_path).list_runs()[-1].state == StageState.BLOCKED
+
+
+def test_success_plus_preflight_blocker_is_reported_as_partial(tmp_path):
+    executor = FakeExecutor([completed(0, {"ok": True})])
+    ledger = StageAttemptLedger(tmp_path)
+    orchestrator = PipelineOrchestrator(ledger, executor)
+
+    result = orchestrator.run(
+        [
+            StageCommand(
+                stage="article",
+                idempotency_key="article-key",
+                args=("article", "publish"),
+            ),
+            StageCommand(
+                stage="video",
+                idempotency_key="video-key",
+                args=("video", "render"),
+                blockers=("missing video approval",),
+            ),
+        ],
+        execute=True,
+    )
+
+    assert [item.state for item in result.stages] == [
+        StageState.SUCCEEDED,
+        StageState.BLOCKED,
+    ]
+    assert ledger.list_runs()[-1].state == StageState.PARTIAL
+
+
 def test_retry_runs_only_the_latest_failed_stage_and_refuses_unknown(tmp_path):
     ledger = StageAttemptLedger(tmp_path)
     failed = ledger.start("video", "video-key", ("video", "render"))

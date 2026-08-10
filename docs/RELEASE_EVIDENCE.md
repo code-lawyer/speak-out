@@ -7,12 +7,13 @@ This file distinguishes implemented behavior from production evidence. Version 1
 | Requirement | Evidence | Status |
 | --- | --- | --- |
 | Windows runtime dependencies | `acp doctor --json` confirmed Python 3.12, FFmpeg, FFprobe, unified config, and installed Chrome on 2026-08-10 | verified |
-| Offline test suite | 65 tests passed on 2026-08-10 | verified |
+| Offline test suite | Full pytest suite passed on 2026-08-10; rerun the suite after every release-gate change | verified |
 | Package build | Source distribution and wheel built with `uv build` | verified |
 | Project-local Agent Skill | Official Skill validator passed for `.agents/skills/content-pipeline` | verified |
 | Landscape video | A fully local Product rendered and re-inspected a 1920×1080 H.264 MP4 with audio, duration 3.5 seconds | verified |
 | Artifact integrity | Source, script, material, and render revisions reported valid SHA-256 manifests in the local smoke Product | verified |
 | Independent run/retry state | Unit and CLI tests cover run IDs, independent branch continuation, exact retry, reconciliation, and legacy SQLite migration | verified offline |
+| Preflight safety | Real candidate-Product dry-run reported missing article/cover/publication/script approvals and separate Edge TTS/Pexels transfer gates; execute mode unit tests prove blocked child processes are not started | verified offline |
 | Secret and Product isolation | `git ls-files .local workspace` returned no tracked files; `git check-ignore` matched both paths | verified |
 
 The ignored local smoke Product is `workspace/2026-08-10-local-render-smoke`. It is evidence on this machine, not repository content and not a portable release fixture.

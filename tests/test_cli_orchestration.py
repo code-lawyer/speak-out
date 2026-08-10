@@ -61,12 +61,49 @@ def test_run_cli_is_dry_by_default_and_builds_independent_exact_commands(tmp_pat
         "video",
         "social:bilibili",
     ]
-    assert all(item["state"] == "planned" for item in payload["stages"])
+    assert all(item["state"] == "blocked" for item in payload["stages"])
+    assert any(
+        "artifact revision is missing: article:v001" in blocker
+        for blocker in payload["stages"][0]["output"]["blockers"]
+    )
+    assert any(
+        "artifact revision is missing: video-script:v003" in blocker
+        for blocker in payload["stages"][1]["output"]["blockers"]
+    )
+    assert any(
+        "artifact revision is missing: video-render:v005" in blocker
+        for blocker in payload["stages"][2]["output"]["blockers"]
+    )
     assert "--json" in payload["stages"][0]["args"]
     assert "--execute" in payload["stages"][0]["args"]
     assert "--allow-edge-tts-data-transfer" in payload["stages"][1]["args"]
     assert "--execute" in payload["stages"][2]["args"]
     assert StageAttemptLedger(product.root).list() == []
+
+
+def test_video_plan_explains_both_external_data_transfer_gates(tmp_path):
+    product = create_product(tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--stage",
+            "video",
+            "--script-revision",
+            "v001",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    blockers = json.loads(result.stdout)["stages"][0]["output"]["blockers"]
+    assert "Edge TTS data-transfer approval is required" in blockers
+    assert "Pexels data-transfer approval is required" in blockers
 
 
 def test_retry_cli_dry_runs_only_latest_failed_or_waiting_stage(tmp_path):

@@ -42,6 +42,8 @@ Use `acp article approve-publication` to bind the exact article revision, cover 
 
 Prefer `acp run` after the preview and approvals. First invoke it without `--execute` and show the exact dry-run plan. Only add `--execute` after the user confirms that plan. The written and video branches may share one run because they are independent; social publication must wait for the newly rendered video to be shown and separately approved.
 
+Treat every `blocked` line in the dry-run as a hard stop. Read all listed blockers to the user and resolve them explicitly; do not add `--execute` while any selected stage remains blocked. The preflight checks exact artifacts and approvals, Edge/Pexels transfer acknowledgements, and known prior publication states. Execute mode will not start a child process for a preflight-blocked stage.
+
 ### Confirm the video branch
 
 Show the rendered MP4 path and preview. Require explicit approval of the video and platform copy before any social-platform submission.

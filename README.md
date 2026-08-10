@@ -91,7 +91,7 @@ Use `xiaohongshu` or `douyin` for the other first-release targets. A visible loc
 
 ## Safe orchestration
 
-`acp run` prints an exact plan by default and performs no side effects. Article publication and video rendering can run as independent branches after their exact approvals:
+`acp run` prints an exact plan by default and performs no side effects. Its preflight verifies selected artifact integrity, exact approvals, Edge/Pexels transfer acknowledgements, and prior publication state. A stage is shown as `blocked` with every known blocker until it is safe to execute. Article publication and video rendering can run as independent branches after their exact approvals:
 
 ```powershell
 uv run acp run `

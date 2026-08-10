@@ -19,6 +19,7 @@ class StageCommand(BaseModel):
     stage: str = Field(min_length=1, pattern=r"^[a-z0-9]+(?::[a-z0-9-]+)?$")
     idempotency_key: str = Field(min_length=1, max_length=512)
     args: tuple[str, ...] = Field(min_length=1)
+    blockers: tuple[str, ...] = ()
 
 
 class StageRunResult(BaseModel):
@@ -99,18 +100,55 @@ class PipelineOrchestrator:
     ) -> PipelineRunResult:
         run_id = f"run-{uuid4()}"
         if not execute:
-            return PipelineRunResult(
-                run_id=run_id,
-                mode="dry-run",
-                stages=tuple(
+            preview_results: list[StageRunResult] = []
+            for command in commands:
+                if command.blockers:
+                    preview_results.append(
+                        StageRunResult(
+                            stage=command.stage,
+                            idempotency_key=command.idempotency_key,
+                            args=command.args,
+                            state=StageState.BLOCKED,
+                            output={"blockers": list(command.blockers)},
+                        )
+                    )
+                    continue
+                prior = self._ledger.latest_exact(
+                    command.stage,
+                    command.idempotency_key,
+                )
+                if prior is None:
+                    state = StageState.PLANNED
+                    output: dict[str, Any] = {}
+                elif prior.state == StageState.SUCCEEDED:
+                    state = StageState.SKIPPED
+                    output = {
+                        "reason": "exact stage already succeeded",
+                        "priorAttempt": prior.id,
+                    }
+                else:
+                    state = StageState.BLOCKED
+                    output = {
+                        "blockers": [
+                            f"prior state is {prior.state.value}; "
+                            "use acp retry or reconcile when allowed"
+                        ],
+                        "priorAttempt": prior.id,
+                    }
+                preview_results.append(
                     StageRunResult(
                         stage=command.stage,
                         idempotency_key=command.idempotency_key,
                         args=command.args,
-                        state=StageState.PLANNED,
+                        state=state,
+                        output=output,
+                        attempt_id=prior.id if prior is not None else None,
                     )
-                    for command in commands
-                ),
+                )
+            return PipelineRunResult(
+                run_id=run_id,
+                mode="dry-run",
+                stages=tuple(preview_results),
             )
 
         self._ledger.start_run(
@@ -120,6 +158,17 @@ class PipelineOrchestrator:
         )
         results: list[StageRunResult] = []
         for command in commands:
+            if command.blockers:
+                results.append(
+                    StageRunResult(
+                        stage=command.stage,
+                        idempotency_key=command.idempotency_key,
+                        args=command.args,
+                        state=StageState.BLOCKED,
+                        output={"blockers": list(command.blockers)},
+                    )
+                )
+                continue
             prior = self._ledger.latest_exact(command.stage, command.idempotency_key)
             if prior is not None:
                 if prior.state == StageState.SUCCEEDED:
@@ -353,6 +402,11 @@ class PipelineOrchestrator:
             return StageState.PARTIAL
         if StageState.WAITING_FOR_USER in states:
             return StageState.WAITING_FOR_USER
+        if StageState.BLOCKED in states and not states & {
+            StageState.SUCCEEDED,
+            StageState.SKIPPED,
+        }:
+            return StageState.BLOCKED
         if states & {StageState.SUCCEEDED, StageState.SKIPPED}:
             return StageState.PARTIAL
         return StageState.FAILED
