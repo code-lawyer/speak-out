@@ -56,7 +56,7 @@ Exit: each Adapter passes offline contract tests and one separately confirmed li
 
 Exit: the full v1 release gate in `PRODUCT.md` is proven with current-state evidence.
 
-Implementation status: the offline orchestration slice is complete. `acp run` is dry-run by default, executes independent branches without rollback, and records redacted stage attempts. `acp retry` replays only the latest `failed` or `waiting_for_user` stage and refuses `unknown`, `partial`, and successful states. The project-local Skill and machine-readable status are validated. The phase exit remains open until the separately approved live release gate is completed.
+Implementation status: the offline orchestration slice is complete. `acp run` is dry-run by default, assigns a durable run ID, executes independent branches without rollback, and records redacted stage attempts. `acp retry` replays only the latest `failed` or `waiting_for_user` stage. `acp reconcile` appends explicit human evidence to resolve `unknown` or interrupted outcomes without rewriting history. Artifact SHA-256 manifests bind approvals to exact bytes; low-level external publication also defaults to dry-run. Source revisions, video inspection, legacy state/artifact migration, explicit Edge/Pexels transfer gates, and a fully local narration option are implemented and tested. The phase exit remains open until the separately approved live release gate is completed.
 
 ## Verification discipline
 

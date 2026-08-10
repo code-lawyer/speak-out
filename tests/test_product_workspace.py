@@ -1,7 +1,10 @@
 from datetime import date
 
+import pytest
+
 from agent_content_pipeline.workspace import (
     ArtifactKind,
+    ArtifactIntegrityError,
     ArtifactRevisionRequest,
     ProductCreateRequest,
     ProductWorkspace,
@@ -86,3 +89,62 @@ def test_completed_large_artifact_directory_is_committed_without_loading_it_into
     assert revision.revision == "v001"
     assert (revision.root / "output" / "final.mp4").read_bytes() == b"video"
     assert not staging.exists()
+
+
+def test_source_notes_are_versioned_and_all_artifact_revisions_are_discoverable(tmp_path):
+    workspace = ProductWorkspace(tmp_path)
+    product = workspace.create(
+        ProductCreateRequest(
+            title="来源记录",
+            slug="source-notes",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    source = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.SOURCE,
+            files={"notes.md": "原始想法".encode("utf-8")},
+        ),
+    )
+    article = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.ARTICLE,
+            files={"article.mdx": b"article"},
+        ),
+    )
+
+    revisions = workspace.list_revisions(product)
+
+    assert source.root == product.root / "source" / "v001"
+    assert [(item.kind, item.revision) for item in revisions] == [
+        (ArtifactKind.SOURCE, "v001"),
+        (ArtifactKind.ARTICLE, "v001"),
+    ]
+    assert article in revisions
+
+
+def test_revision_manifest_detects_any_change_after_artifact_creation(tmp_path):
+    workspace = ProductWorkspace(tmp_path)
+    product = workspace.create(
+        ProductCreateRequest(
+            title="完整性测试",
+            slug="integrity-test",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    revision = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.ARTICLE,
+            files={"article.mdx": b"approved bytes"},
+        ),
+    )
+
+    assert (revision.root / ".artifact.json").is_file()
+    assert workspace.verify_revision(product, ArtifactKind.ARTICLE, "v001") == revision
+
+    (revision.root / "article.mdx").write_bytes(b"changed after approval")
+    with pytest.raises(ArtifactIntegrityError, match="sha256 mismatch"):
+        workspace.verify_revision(product, ArtifactKind.ARTICLE, "v001")

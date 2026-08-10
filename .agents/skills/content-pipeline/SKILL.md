@@ -24,6 +24,7 @@ Read [content-contract.md](references/content-contract.md) before creating artic
 ### Prepare the Product
 
 - Turn the user's source material into a finalized Chinese opinion or educational article.
+- Save raw notes and inputs with `acp artifact add-source`; keep them out of release article files.
 - Do not place research notes, raw-source links, or editorial annotations in the release article unless the user explicitly requests them.
 - Create WeChat HTML without inline illustrations.
 - Generate exactly one separately approved landscape WeChat cover using the Agent's available image tool, or accept a user-provided cover.
@@ -47,7 +48,11 @@ Show the rendered MP4 path and preview. Require explicit approval of the video a
 
 Use the same approved 16:9 video for Xiaohongshu, Douyin, and Bilibili. Adapt only platform-required metadata.
 
+Run `acp social preview` separately for every selected platform and show its immediate-publication target, title, body, tags, category, and exact video revision before `acp social approve-publication`.
+
 Before Edge TTS, tell the user that narration text is sent to Microsoft's online speech service. Use `acp artifact add-video-material` plus `acp video render --material-revision ...` for local footage; omit the material revision only when the user has configured and accepts Pexels search/download.
+
+Pass `--allow-edge-tts-data-transfer` only after the user explicitly accepts that exact narration transfer. Pass `--allow-pexels-data-transfer` only after the user accepts that exact material-term transfer. For private narration, provide both local `--narration-audio` and `--subtitles`; this bypasses Edge TTS. Run `acp video inspect` on the finished revision, show the exact MP4, then record video approval.
 
 ### Publish and recover
 
@@ -60,9 +65,14 @@ Before Edge TTS, tell the user that narration text is sent to Microsoft's online
 - Record `video` approval for the exact render, then use `acp social approve-publication` separately for each platform. `acp social publish` automatically opens or reconnects to that platform's dedicated Chrome Profile.
 - If the CLI returns `waiting_for_user`, leave the visible window open, ask the user to complete login or required options, then use `acp retry` for only that platform stage.
 - If the CLI returns `unknown`, stop. Do not click publish again until the platform page or account proves the first submission was absent.
+- After the user personally verifies an `unknown` or interrupted action, use dry-run `acp reconcile` with a non-secret evidence note. Apply it only with `--execute --confirmed-by-user`. Never reconcile `partial` as absent.
+
+Every new revision is hash-sealed. If integrity validation fails, create a new revision; never edit or reseal an already sealed revision. For a legacy revision with no manifest, use `acp artifact seal-legacy` only after the user confirms the current bytes are the intended baseline; sealing does not grant approval.
 
 ## Hard stops
 
 Stop before an external action when approval is absent, the selected artifact revision changed after approval, credentials are missing, a destination's prior result is unknown, or the CLI reports validation failure.
 
 Never bypass these stops with browser clicks, direct HTTP requests, ad hoc scripts, or an Agent-specific browser tool.
+
+The low-level `acp article publish` and `acp social publish` commands are also dry-run by default. Their `--execute` flag is required even when invoked outside `acp run`.

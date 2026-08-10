@@ -5,7 +5,10 @@ from typer.testing import CliRunner
 
 from agent_content_pipeline import cli
 from agent_content_pipeline.cli import app
-from agent_content_pipeline.pipeline import article_publication_approval_key
+from agent_content_pipeline.pipeline import (
+    article_publication_approval_key,
+    article_publication_content_digest,
+)
 from agent_content_pipeline.publishing.article import ArticlePublishResult, PublicationState
 from agent_content_pipeline.state import ApprovalLedger, ApprovalScope
 from agent_content_pipeline.workspace import (
@@ -36,7 +39,7 @@ request_timeout_seconds = 30
             created_on=date(2026, 8, 10),
         )
     )
-    workspace.add_revision(
+    article = workspace.add_revision(
         product,
         ArtifactRevisionRequest(
             kind=ArtifactKind.ARTICLE,
@@ -47,7 +50,7 @@ request_timeout_seconds = 30
             },
         ),
     )
-    workspace.add_revision(
+    cover = workspace.add_revision(
         product,
         ArtifactRevisionRequest(
             kind=ArtifactKind.COVER,
@@ -97,6 +100,32 @@ def test_article_publication_approval_is_bound_to_all_exact_inputs(tmp_path):
             created_on=date(2026, 8, 10),
         )
     )
+    article = None
+    for _ in range(2):
+        article = workspace.add_revision(
+            product,
+            ArtifactRevisionRequest(
+                kind=ArtifactKind.ARTICLE,
+                files={
+                    "article.mdx": b"article",
+                    "body.html": b"<p>body</p>",
+                    "index.html": b"<html>body</html>",
+                },
+            ),
+        )
+    cover = None
+    for _ in range(3):
+        cover = workspace.add_revision(
+            product,
+            ArtifactRevisionRequest(
+                kind=ArtifactKind.COVER,
+                files={"cover.png": b"cover"},
+            ),
+        )
+    assert article is not None and cover is not None
+    approvals = ApprovalLedger(product.root)
+    approvals.record(ApprovalScope.ARTICLE, "v002", article.digest)
+    approvals.record(ApprovalScope.COVER, "v003", cover.digest)
 
     result = CliRunner().invoke(
         app,
@@ -145,7 +174,7 @@ request_timeout_seconds = 30
             created_on=date(2026, 8, 10),
         )
     )
-    workspace.add_revision(
+    article = workspace.add_revision(
         product,
         ArtifactRevisionRequest(
             kind=ArtifactKind.ARTICLE,
@@ -156,7 +185,7 @@ request_timeout_seconds = 30
             },
         ),
     )
-    workspace.add_revision(
+    cover = workspace.add_revision(
         product,
         ArtifactRevisionRequest(
             kind=ArtifactKind.COVER,
@@ -164,14 +193,23 @@ request_timeout_seconds = 30
         ),
     )
     ledger = ApprovalLedger(product.root)
-    ledger.record(ApprovalScope.ARTICLE, "v001")
-    ledger.record(ApprovalScope.COVER, "v001")
+    ledger.record(ApprovalScope.ARTICLE, "v001", article.digest)
+    ledger.record(ApprovalScope.COVER, "v001", cover.digest)
     ledger.record(
         ApprovalScope.ARTICLE_PUBLICATION,
         article_publication_approval_key("v001", "v001", "publish-test", True),
+        article_publication_content_digest(
+            article.digest,
+            cover.digest,
+            "publish-test",
+            True,
+        ),
     )
 
+    publish_calls = []
+
     def succeed(self, preview):
+        publish_calls.append(preview)
         assert preview.request_body["coverImageBase64"].startswith("data:image/png;base64,")
         return ArticlePublishResult(
             state=PublicationState.SUCCEEDED,
@@ -185,7 +223,7 @@ request_timeout_seconds = 30
         )
 
     monkeypatch.setattr(cli.FixedIpVpsPublisher, "publish", succeed)
-    result = CliRunner().invoke(
+    dry_run = CliRunner().invoke(
         app,
         [
             "article",
@@ -201,6 +239,28 @@ request_timeout_seconds = 30
             "--json",
         ],
     )
+    assert dry_run.exit_code == 0, dry_run.output
+    assert json.loads(dry_run.stdout)["mode"] == "dry-run"
+    assert json.loads(dry_run.stdout)["state"] == "planned"
+    assert publish_calls == []
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "article",
+            "publish",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--article-revision",
+            "v001",
+            "--cover-revision",
+            "v001",
+            "--execute",
+            "--json",
+        ],
+    )
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
@@ -213,3 +273,4 @@ request_timeout_seconds = 30
     assert "remote-secret-token" not in result.stdout + log_text
     assert payload["response"]["accessToken"] == "[REDACTED]"
     assert payload["state"] == "succeeded"
+    assert len(publish_calls) == 1

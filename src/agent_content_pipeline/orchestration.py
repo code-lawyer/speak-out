@@ -4,11 +4,13 @@ import json
 import re
 import subprocess
 import sys
+from enum import StrEnum
 from typing import Any, Protocol, Sequence
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .state import StageAttemptLedger, StageState
+from .state import PublicationLedger, StageAttemptLedger, StageState
 
 
 class StageCommand(BaseModel):
@@ -33,6 +35,7 @@ class StageRunResult(BaseModel):
 class PipelineRunResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    run_id: str
     mode: str
     stages: tuple[StageRunResult, ...]
 
@@ -54,6 +57,15 @@ class SubprocessStageExecutor:
 
 
 class RetryNotAllowed(RuntimeError):
+    pass
+
+
+class ReconciliationOutcome(StrEnum):
+    ABSENT = "absent"
+    SUCCEEDED = "succeeded"
+
+
+class ReconciliationNotAllowed(RuntimeError):
     pass
 
 
@@ -85,8 +97,10 @@ class PipelineOrchestrator:
         *,
         execute: bool = False,
     ) -> PipelineRunResult:
+        run_id = f"run-{uuid4()}"
         if not execute:
             return PipelineRunResult(
+                run_id=run_id,
                 mode="dry-run",
                 stages=tuple(
                     StageRunResult(
@@ -99,6 +113,11 @@ class PipelineOrchestrator:
                 ),
             )
 
+        self._ledger.start_run(
+            run_id,
+            "execute",
+            tuple(command.model_dump(mode="json") for command in commands),
+        )
         results: list[StageRunResult] = []
         for command in commands:
             prior = self._ledger.latest_exact(command.stage, command.idempotency_key)
@@ -128,10 +147,17 @@ class PipelineOrchestrator:
                     )
                 )
                 continue
-            results.append(self._execute(command))
-        return PipelineRunResult(mode="execute", stages=tuple(results))
+            results.append(self._execute(command, run_id))
+        run_state = self._overall_state(results)
+        self._ledger.finish_run(
+            run_id,
+            run_state,
+            tuple(item.model_dump(mode="json") for item in results),
+        )
+        return PipelineRunResult(run_id=run_id, mode="execute", stages=tuple(results))
 
     def retry(self, stage: str, *, execute: bool = False) -> PipelineRunResult:
+        run_id = f"run-{uuid4()}"
         prior = self._ledger.latest(stage)
         if prior is None:
             raise RetryNotAllowed(f"stage has no prior attempt: {stage}")
@@ -146,6 +172,7 @@ class PipelineOrchestrator:
         )
         if not execute:
             return PipelineRunResult(
+                run_id=run_id,
                 mode="dry-run",
                 stages=(
                     StageRunResult(
@@ -157,10 +184,137 @@ class PipelineOrchestrator:
                     ),
                 ),
             )
-        return PipelineRunResult(mode="retry", stages=(self._execute(command),))
+        self._ledger.start_run(
+            run_id,
+            "retry",
+            (command.model_dump(mode="json"),),
+        )
+        stage_result = self._execute(command, run_id)
+        self._ledger.finish_run(
+            run_id,
+            self._overall_state([stage_result]),
+            (stage_result.model_dump(mode="json"),),
+        )
+        return PipelineRunResult(run_id=run_id, mode="retry", stages=(stage_result,))
 
-    def _execute(self, command: StageCommand) -> StageRunResult:
-        attempt = self._ledger.start(command.stage, command.idempotency_key, command.args)
+    def reconcile(
+        self,
+        stage: str,
+        outcome: ReconciliationOutcome,
+        *,
+        evidence: str,
+        execute: bool = False,
+    ) -> PipelineRunResult:
+        run_id = f"run-{uuid4()}"
+        prior = self._ledger.latest(stage)
+        if prior is None:
+            raise ReconciliationNotAllowed(f"stage has no prior attempt: {stage}")
+        allowed_states = {
+            ReconciliationOutcome.ABSENT: {StageState.UNKNOWN, StageState.RUNNING},
+            ReconciliationOutcome.SUCCEEDED: {
+                StageState.UNKNOWN,
+                StageState.RUNNING,
+                StageState.PARTIAL,
+            },
+        }
+        if prior.state not in allowed_states[outcome]:
+            raise ReconciliationNotAllowed(
+                f"cannot reconcile {prior.state.value} as {outcome.value}: {stage}"
+            )
+        evidence = evidence.strip()
+        if not evidence:
+            raise ReconciliationNotAllowed("reconciliation evidence is required")
+        resolved_state = (
+            StageState.FAILED
+            if outcome == ReconciliationOutcome.ABSENT
+            else StageState.SUCCEEDED
+        )
+        output = {
+            "reconciliation": {
+                "priorAttempt": prior.id,
+                "priorState": prior.state.value,
+                "outcome": outcome.value,
+                "evidence": evidence,
+            }
+        }
+        if not execute:
+            return PipelineRunResult(
+                run_id=run_id,
+                mode="dry-run",
+                stages=(
+                    StageRunResult(
+                        stage=prior.stage,
+                        idempotency_key=prior.idempotency_key,
+                        args=prior.args,
+                        state=StageState.PLANNED,
+                        output=output,
+                    ),
+                ),
+            )
+
+        command_record = {
+            "stage": prior.stage,
+            "idempotency_key": prior.idempotency_key,
+            "args": list(prior.args),
+            "reconciliation": output["reconciliation"],
+        }
+        self._ledger.start_run(run_id, "reconcile", (command_record,))
+        attempt = self._ledger.record_terminal(
+            run_id=run_id,
+            stage=prior.stage,
+            idempotency_key=prior.idempotency_key,
+            args=prior.args,
+            state=resolved_state,
+            output=output,
+        )
+        self._record_publication_reconciliation(
+            prior.stage,
+            prior.idempotency_key,
+            outcome,
+        )
+        result = StageRunResult(
+            stage=prior.stage,
+            idempotency_key=prior.idempotency_key,
+            args=prior.args,
+            state=resolved_state,
+            output=output,
+            attempt_id=attempt.id,
+        )
+        self._ledger.finish_run(
+            run_id,
+            resolved_state,
+            (result.model_dump(mode="json"),),
+        )
+        return PipelineRunResult(run_id=run_id, mode="reconcile", stages=(result,))
+
+    def _record_publication_reconciliation(
+        self,
+        stage: str,
+        idempotency_key: str,
+        outcome: ReconciliationOutcome,
+    ) -> None:
+        if stage == "article":
+            destination = "website-wechat"
+            succeeded_state = "succeeded"
+        elif stage.startswith("social:"):
+            destination = stage
+            succeeded_state = "submitted"
+        else:
+            return
+        state = "failed" if outcome == ReconciliationOutcome.ABSENT else succeeded_state
+        PublicationLedger(self._ledger.state_path.parent).record_state(
+            destination,
+            idempotency_key,
+            state,
+        )
+
+    def _execute(self, command: StageCommand, run_id: str) -> StageRunResult:
+        attempt = self._ledger.start(
+            command.stage,
+            command.idempotency_key,
+            command.args,
+            run_id=run_id,
+        )
         try:
             completed = self._executor.run(command.args)
         except Exception as error:
@@ -187,6 +341,21 @@ class PipelineOrchestrator:
             output=finished.output,
             attempt_id=finished.id,
         )
+
+    @staticmethod
+    def _overall_state(results: Sequence[StageRunResult]) -> StageState:
+        states = {item.state for item in results}
+        if states <= {StageState.SUCCEEDED, StageState.SKIPPED}:
+            return StageState.SUCCEEDED
+        if StageState.UNKNOWN in states:
+            return StageState.UNKNOWN
+        if StageState.PARTIAL in states:
+            return StageState.PARTIAL
+        if StageState.WAITING_FOR_USER in states:
+            return StageState.WAITING_FOR_USER
+        if states & {StageState.SUCCEEDED, StageState.SKIPPED}:
+            return StageState.PARTIAL
+        return StageState.FAILED
 
     @staticmethod
     def _parse_output(stdout: str, stderr: str) -> dict[str, Any]:
@@ -219,6 +388,8 @@ class PipelineOrchestrator:
 __all__ = [
     "PipelineOrchestrator",
     "PipelineRunResult",
+    "ReconciliationNotAllowed",
+    "ReconciliationOutcome",
     "RetryNotAllowed",
     "StageCommand",
     "StageRunResult",

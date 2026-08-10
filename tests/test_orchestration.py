@@ -5,11 +5,14 @@ import pytest
 
 from agent_content_pipeline.orchestration import (
     PipelineOrchestrator,
+    ReconciliationNotAllowed,
+    ReconciliationOutcome,
     RetryNotAllowed,
     StageCommand,
     StageState,
 )
 from agent_content_pipeline.state import StageAttemptLedger
+from agent_content_pipeline.state import PublicationLedger
 
 
 class FakeExecutor:
@@ -58,6 +61,12 @@ def test_run_keeps_independent_branch_success_when_another_branch_fails(tmp_path
         ("article", StageState.FAILED),
         ("video", StageState.SUCCEEDED),
     ]
+    assert result.run_id
+    assert {item.run_id for item in attempts} == {result.run_id}
+    runs = StageAttemptLedger(tmp_path).list_runs()
+    assert len(runs) == 1
+    assert runs[0].run_id == result.run_id
+    assert runs[0].state == StageState.PARTIAL
 
 
 def test_run_is_dry_by_default_and_returns_exact_commands(tmp_path):
@@ -76,6 +85,7 @@ def test_run_is_dry_by_default_and_returns_exact_commands(tmp_path):
     assert result.stages[0].args == command.args
     assert executor.calls == []
     assert StageAttemptLedger(tmp_path).list() == []
+    assert StageAttemptLedger(tmp_path).list_runs() == []
 
 
 def test_retry_runs_only_the_latest_failed_stage_and_refuses_unknown(tmp_path):
@@ -90,6 +100,8 @@ def test_retry_runs_only_the_latest_failed_stage_and_refuses_unknown(tmp_path):
     retried = orchestrator.retry("video", execute=True)
 
     assert retried.stages[0].state == StageState.SUCCEEDED
+    assert retried.run_id
+    assert ledger.latest("video").run_id == retried.run_id
     assert executor.calls == [("video", "render")]
     with pytest.raises(RetryNotAllowed):
         orchestrator.retry("article", execute=True)
@@ -113,3 +125,53 @@ def test_executor_start_failure_is_recorded_instead_of_leaving_running_attempt(t
     assert attempt is not None
     assert attempt.state == StageState.FAILED
     assert attempt.finished_at is not None
+
+
+def test_reconcile_unknown_as_absent_appends_evidence_and_enables_exact_retry(tmp_path):
+    ledger = StageAttemptLedger(tmp_path)
+    unknown = ledger.start(
+        "social:bilibili",
+        "social-key",
+        ("social", "publish", "--platform", "bilibili"),
+    )
+    ledger.finish(unknown.id, StageState.UNKNOWN, 1, {"error": "timeout"})
+    PublicationLedger(tmp_path).record_state("social:bilibili", "social-key", "unknown")
+    executor = FakeExecutor([completed(0, {"ok": True, "state": "submitted"})])
+    orchestrator = PipelineOrchestrator(ledger, executor)
+
+    preview = orchestrator.reconcile(
+        "social:bilibili",
+        ReconciliationOutcome.ABSENT,
+        evidence="Checked creator center; no matching submission exists.",
+        execute=False,
+    )
+
+    assert preview.mode == "dry-run"
+    assert len(ledger.list()) == 1
+    reconciled = orchestrator.reconcile(
+        "social:bilibili",
+        ReconciliationOutcome.ABSENT,
+        evidence="Checked creator center; no matching submission exists.",
+        execute=True,
+    )
+    assert reconciled.stages[0].state == StageState.FAILED
+    assert reconciled.stages[0].output["reconciliation"]["outcome"] == "absent"
+    assert PublicationLedger(tmp_path).get_state("social:bilibili", "social-key") == "failed"
+
+    retried = orchestrator.retry("social:bilibili", execute=True)
+    assert retried.stages[0].state == StageState.SUCCEEDED
+
+
+def test_reconcile_partial_as_absent_is_refused(tmp_path):
+    ledger = StageAttemptLedger(tmp_path)
+    partial = ledger.start("article", "article-key", ("article", "publish"))
+    ledger.finish(partial.id, StageState.PARTIAL, 1, {"state": "partial"})
+    orchestrator = PipelineOrchestrator(ledger, FakeExecutor([]))
+
+    with pytest.raises(ReconciliationNotAllowed):
+        orchestrator.reconcile(
+            "article",
+            ReconciliationOutcome.ABSENT,
+            evidence="Website exists but WeChat failed.",
+            execute=True,
+        )

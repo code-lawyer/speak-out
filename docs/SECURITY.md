@@ -14,13 +14,19 @@ The user explicitly chose one plaintext, editable `.local/secrets.toml` file ins
 
 Each platform uses a dedicated Chrome Profile under `.local/browser-profiles/`. The program must state which site will open and what login state will be retained before launching Chrome. The user's default Chrome Profile is out of scope.
 
+Failed or uncertain browser publication may save a diagnostic screenshot under the ignored Product `logs/` directory. It can contain visible account-page information, so it must remain local and must not be attached to public issues without review.
+
 ## External actions
 
 Production article publication and video-platform submission require recorded approval. Timeouts after submission produce an `unknown` state and require reconciliation before retry.
 
 Edge TTS is an online service: the narration text leaves the machine. Pexels search terms leave the machine when remote stock materials are selected. Local-material rendering with pre-existing audio is the data-minimizing alternative. The CLI must not silently replace one with the other.
 
+The CLI requires `--allow-edge-tts-data-transfer` before constructing the online narrator and `--allow-pexels-data-transfer` before remote material search. These flags are exact-command acknowledgements, not permanent consent. Supplying both local `--narration-audio` and `--subtitles` bypasses Edge TTS; supplying `--material-revision` bypasses Pexels.
+
 Article publication sends the approved MDX, WeChat HTML, and cover to the configured VPS. Social publication exposes only the approved MP4 and platform copy to the selected creator page in visible Chrome.
+
+Every artifact revision is sealed with a local SHA-256 manifest. Artifact and publication approvals retain the associated content digest. A missing or changed file blocks later approval or execution. Legacy revisions require an explicit seal operation and must then be approved normally.
 
 ## Reporting
 

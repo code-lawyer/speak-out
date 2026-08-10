@@ -4,7 +4,13 @@ from datetime import date
 from typer.testing import CliRunner
 
 from agent_content_pipeline.cli import app
-from agent_content_pipeline.workspace import ProductCreateRequest, ProductWorkspace
+from agent_content_pipeline.state import ApprovalLedger, ApprovalScope
+from agent_content_pipeline.workspace import (
+    ArtifactKind,
+    ArtifactRevisionRequest,
+    ProductCreateRequest,
+    ProductWorkspace,
+)
 
 
 def test_cli_creates_a_product_and_reports_machine_readable_result(tmp_path):
@@ -126,12 +132,20 @@ def test_cli_reports_a_product_after_a_fresh_process_load(tmp_path):
 
 
 def test_cli_records_approval_for_one_exact_artifact_revision(tmp_path):
-    product = ProductWorkspace(tmp_path).create(
+    workspace = ProductWorkspace(tmp_path)
+    product = workspace.create(
         ProductCreateRequest(
             title="测试文章",
             slug="approval-test",
             created_on=date(2026, 8, 10),
         )
+    )
+    revision = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.ARTICLE,
+            files={"article.mdx": b"approved"},
+        ),
     )
 
     recorded = CliRunner().invoke(
@@ -162,4 +176,188 @@ def test_cli_records_approval_for_one_exact_artifact_revision(tmp_path):
     )
     assert json.loads(status.stdout)["approvals"] == [
         {"scope": "article", "revision": "v001"}
+    ]
+    assert ApprovalLedger(product.root).has(
+        ApprovalScope.ARTICLE,
+        "v001",
+        revision.digest,
+    )
+
+
+def test_cli_refuses_approval_after_revision_content_changes(tmp_path):
+    workspace = ProductWorkspace(tmp_path)
+    product = workspace.create(
+        ProductCreateRequest(
+            title="审批完整性",
+            slug="approval-integrity",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    revision = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.ARTICLE,
+            files={"article.mdx": b"shown to user"},
+        ),
+    )
+    (revision.root / "article.mdx").write_bytes(b"silently changed")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "approval",
+            "record",
+            "--product",
+            str(product.root),
+            "--scope",
+            "article",
+            "--revision",
+            "v001",
+            "--confirmed-by-user",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "sha256 mismatch" in result.output
+
+
+def test_generic_approval_command_cannot_bypass_publication_specific_gate(tmp_path):
+    product = ProductWorkspace(tmp_path).create(
+        ProductCreateRequest(
+            title="发布审批",
+            slug="publication-approval-gate",
+            created_on=date(2026, 8, 10),
+        )
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "approval",
+            "record",
+            "--product",
+            str(product.root),
+            "--scope",
+            "article-publication",
+            "--revision",
+            "v001+v001+slug+wechat",
+            "--confirmed-by-user",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "dedicated publication approval command" in result.output
+
+
+def test_cli_can_explicitly_seal_a_legacy_revision_without_approving_it(tmp_path):
+    product = ProductWorkspace(tmp_path).create(
+        ProductCreateRequest(
+            title="旧产物迁移",
+            slug="legacy-artifact",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    legacy_root = product.root / "video" / "script" / "v001"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "script.json").write_text("{}", encoding="utf-8")
+
+    denied = CliRunner().invoke(
+        app,
+        [
+            "artifact",
+            "seal-legacy",
+            "--product",
+            str(product.root),
+            "--kind",
+            "video-script",
+            "--revision",
+            "v001",
+        ],
+    )
+    assert denied.exit_code != 0
+    assert "--confirmed-by-user" in denied.output
+
+    sealed = CliRunner().invoke(
+        app,
+        [
+            "artifact",
+            "seal-legacy",
+            "--product",
+            str(product.root),
+            "--kind",
+            "video-script",
+            "--revision",
+            "v001",
+            "--confirmed-by-user",
+            "--json",
+        ],
+    )
+
+    assert sealed.exit_code == 0, sealed.output
+    assert json.loads(sealed.stdout)["artifact"]["digest"]
+    assert (legacy_root / ".artifact.json").is_file()
+    assert ApprovalLedger(product.root).list() == []
+
+
+def test_cli_adds_source_notes_as_an_immutable_revision(tmp_path):
+    product = ProductWorkspace(tmp_path).create(
+        ProductCreateRequest(
+            title="源资料",
+            slug="source-cli",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    note = tmp_path / "notes.md"
+    note.write_text("原始记录只保留在 source，不进入发行文章。", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "artifact",
+            "add-source",
+            "--product",
+            str(product.root),
+            "--source",
+            str(note),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    root = product.root / "source" / "v001"
+    assert (root / "notes.md").read_text(encoding="utf-8").startswith("原始记录")
+    assert (root / ".artifact.json").is_file()
+
+
+def test_product_status_lists_available_artifact_revisions(tmp_path):
+    workspace = ProductWorkspace(tmp_path)
+    product = workspace.create(
+        ProductCreateRequest(
+            title="产物状态",
+            slug="artifact-status",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.SOURCE,
+            files={"notes.md": b"notes"},
+        ),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["product", "status", "--product", str(product.root), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["artifacts"] == [
+        {
+            "kind": "source",
+            "revision": "v001",
+            "root": str(product.root / "source" / "v001"),
+            "integrity": "valid",
+        }
     ]

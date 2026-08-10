@@ -5,14 +5,18 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from agent_content_pipeline import cli
+from agent_content_pipeline.browser.cdp import CdpError
 from agent_content_pipeline.cli import app
-from agent_content_pipeline.pipeline import social_publication_approval_key
+from agent_content_pipeline.pipeline import (
+    social_publication_approval_key,
+    social_publication_content_digest,
+)
 from agent_content_pipeline.social.models import (
     SocialPlatform,
     SocialPublicationState,
     SocialPublishResult,
 )
-from agent_content_pipeline.state import ApprovalLedger, ApprovalScope
+from agent_content_pipeline.state import ApprovalLedger, ApprovalScope, PublicationLedger
 from agent_content_pipeline.workspace import (
     ArtifactKind,
     ArtifactRevisionRequest,
@@ -46,8 +50,12 @@ chrome_path = "C:/fake/chrome.exe"
     staging = product.root / "video" / "work" / "done"
     (staging / "output").mkdir(parents=True)
     (staging / "output" / "final.mp4").write_bytes(b"video")
-    workspace.commit_revision_directory(product, ArtifactKind.VIDEO_RENDER, staging)
-    workspace.add_revision(
+    video_revision = workspace.commit_revision_directory(
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        staging,
+    )
+    copy_revision = workspace.add_revision(
         product,
         ArtifactRevisionRequest(
             kind=ArtifactKind.SOCIAL_COPY,
@@ -72,14 +80,55 @@ chrome_path = "C:/fake/chrome.exe"
         ),
     )
     approvals = ApprovalLedger(product.root)
-    approvals.record(ApprovalScope.VIDEO, "v001")
+    approvals.record(ApprovalScope.VIDEO, "v001", video_revision.digest)
+
+    preview = CliRunner().invoke(
+        app,
+        [
+            "social",
+            "preview",
+            "--product",
+            str(product.root),
+            "--platform",
+            "bilibili",
+            "--video-revision",
+            "v001",
+            "--copy-revision",
+            "v001",
+            "--json",
+        ],
+    )
+    assert preview.exit_code == 0, preview.output
+    preview_payload = json.loads(preview.stdout)
+    assert preview_payload["mode"] == "dry-run"
+    assert preview_payload["target"] == "immediate-publication"
+    assert preview_payload["title"] == "B站"
+    assert preview_payload["videoApproved"] is True
+    assert preview_payload["publicationApproved"] is False
+
     approvals.record(
         ApprovalScope.SOCIAL_PUBLICATION,
         social_publication_approval_key("v001", "v001", SocialPlatform.BILIBILI),
+        social_publication_content_digest(
+            video_revision.digest,
+            copy_revision.digest,
+            SocialPlatform.BILIBILI,
+        ),
+    )
+    approvals.record(
+        ApprovalScope.SOCIAL_PUBLICATION,
+        social_publication_approval_key("v001", "v001", SocialPlatform.DOUYIN),
+        social_publication_content_digest(
+            video_revision.digest,
+            copy_revision.digest,
+            SocialPlatform.DOUYIN,
+        ),
     )
 
     class FakeSession:
         websocket_url = "ws://fake"
+
+    driver_calls = []
 
     class FakeDriver:
         def __init__(self, *, project_root, chrome_path):
@@ -87,8 +136,9 @@ chrome_path = "C:/fake/chrome.exe"
             assert chrome_path == Path("C:/fake/chrome.exe")
 
         def launch(self, *, platform, start_url):
-            assert platform == "bilibili"
-            assert start_url.startswith("https://member.bilibili.com/")
+            driver_calls.append((platform, start_url))
+            assert platform in {"bilibili", "douyin"}
+            assert start_url.startswith("https://")
             return FakeSession()
 
     class FakeCdp:
@@ -100,10 +150,12 @@ chrome_path = "C:/fake/chrome.exe"
 
     class FakePublisher:
         def __init__(self, platform):
-            assert platform == SocialPlatform.BILIBILI
-            self.contract = type("Contract", (), {"upload_url": "https://member.bilibili.com/upload"})()
+            self.platform = platform
+            self.contract = type("Contract", (), {"upload_url": "https://example.com/upload"})()
 
         def publish(self, page, spec):
+            if self.platform == SocialPlatform.DOUYIN:
+                raise CdpError("connection lost after upload")
             assert spec.video_path.read_bytes() == b"video"
             assert spec.category == "知识"
             return SocialPublishResult(
@@ -114,10 +166,16 @@ chrome_path = "C:/fake/chrome.exe"
 
     monkeypatch.setattr(cli, "LocalChromeCdpDriver", FakeDriver)
     monkeypatch.setattr(cli, "CdpWebSocketClient", FakeCdp)
-    monkeypatch.setattr(cli.ChromePageController, "attach", lambda cdp: object())
+    class FakePage:
+        def screenshot(self, path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"diagnostic")
+            return path
+
+    monkeypatch.setattr(cli.ChromePageController, "attach", lambda cdp: FakePage())
     monkeypatch.setattr(cli, "VisibleChromePlatformPublisher", FakePublisher)
 
-    result = CliRunner().invoke(
+    dry_run = CliRunner().invoke(
         app,
         [
             "social",
@@ -135,12 +193,37 @@ chrome_path = "C:/fake/chrome.exe"
             "--json",
         ],
     )
+    assert dry_run.exit_code == 0, dry_run.output
+    assert json.loads(dry_run.stdout)["mode"] == "dry-run"
+    assert json.loads(dry_run.stdout)["state"] == "planned"
+    assert driver_calls == []
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "social",
+            "publish",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--platform",
+            "bilibili",
+            "--video-revision",
+            "v001",
+            "--copy-revision",
+            "v001",
+            "--execute",
+            "--json",
+        ],
+    )
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["platform"] == "bilibili"
     assert payload["state"] == "submitted"
     assert (product.root / payload["logFile"]).is_file()
+    assert len(driver_calls) == 1
     status = CliRunner().invoke(
         app,
         ["product", "status", "--product", str(product.root), "--json"],
@@ -148,3 +231,32 @@ chrome_path = "C:/fake/chrome.exe"
     publications = json.loads(status.stdout)["publications"]
     assert publications[0]["destination"] == "social:bilibili"
     assert publications[0]["state"] == "submitted"
+
+    uncertain = CliRunner().invoke(
+        app,
+        [
+            "social",
+            "publish",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--platform",
+            "douyin",
+            "--video-revision",
+            "v001",
+            "--copy-revision",
+            "v001",
+            "--execute",
+            "--json",
+        ],
+    )
+    assert uncertain.exit_code != 0
+    assert uncertain.stdout, repr(uncertain.exception)
+    uncertain_payload = json.loads(uncertain.stdout)
+    assert uncertain_payload["state"] == "unknown"
+    assert (product.root / uncertain_payload["screenshotFile"]).read_bytes() == b"diagnostic"
+    assert PublicationLedger(product.root).get_state(
+        "social:douyin",
+        social_publication_approval_key("v001", "v001", SocialPlatform.DOUYIN),
+    ) == "unknown"

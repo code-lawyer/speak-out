@@ -9,6 +9,8 @@ Agent Content Pipeline is a Windows-first, local-first open-source workflow for 
 
 The product is controlled through a deterministic Python CLI. A project-local Skill teaches compatible agents how to create the content artifacts and when to request approval. The core never calls an LLM.
 
+The discoverable project Skill is installed at `.agents/skills/content-pipeline/`; it is part of this repository and is not a global installation.
+
 ## Status
 
 The local CLI, article compatibility path, video engine, Chrome/CDP driver, and first three social adapters are implemented. The offline suite is green; version 1.0 remains unreleased until separately approved live publications prove Xiaohongshu, Douyin, and Bilibili against their current creator pages.
@@ -54,6 +56,7 @@ Create a Product and add immutable article, cover, video-script, local-material,
 
 ```powershell
 uv run acp product create --title "标题" --slug article-slug --date 2026-08-10
+uv run acp artifact add-source --product <product> --source notes.md
 uv run acp artifact add-article --product <product> --mdx article.mdx --body-html body.html --wechat-html index.html
 uv run acp artifact add-cover --product <product> --cover cover.png
 uv run acp artifact add-video-script --product <product> --script script.json
@@ -68,18 +71,20 @@ uv run acp approval record --product <product> --scope article --revision v001 -
 uv run acp approval record --product <product> --scope cover --revision v001 --confirmed-by-user
 uv run acp article approve-publication --product <product> --article-revision v001 --cover-revision v001 --confirmed-by-user
 uv run acp article preview --project-root . --product <product> --article-revision v001 --cover-revision v001
-uv run acp article publish --project-root . --product <product> --article-revision v001 --cover-revision v001
+uv run acp article publish --project-root . --product <product> --article-revision v001 --cover-revision v001 --execute
 
 uv run acp approval record --product <product> --scope video-script --revision v001 --confirmed-by-user
-uv run acp video render --project-root . --product <product> --script-revision v001 --material-revision v001
+uv run acp video render --project-root . --product <product> --script-revision v001 --material-revision v001 --allow-edge-tts-data-transfer
+uv run acp video inspect --product <product> --revision v001
 uv run acp approval record --product <product> --scope video --revision v001 --confirmed-by-user
 ```
 
 Approve and submit each social platform independently:
 
 ```powershell
+uv run acp social preview --product <product> --platform bilibili --video-revision v001 --copy-revision v001
 uv run acp social approve-publication --product <product> --platform bilibili --video-revision v001 --copy-revision v001 --confirmed-by-user
-uv run acp social publish --project-root . --product <product> --platform bilibili --video-revision v001 --copy-revision v001
+uv run acp social publish --project-root . --product <product> --platform bilibili --video-revision v001 --copy-revision v001 --execute
 ```
 
 Use `xiaohongshu` or `douyin` for the other first-release targets. A visible local Chrome window opens automatically. If login is required, the command stops with `waiting_for_user`; complete login in that window and use the stage-specific `acp retry` flow below. The dedicated Profile remains under `.local/browser-profiles/<platform>/`.
@@ -97,7 +102,8 @@ uv run acp run `
   --article-revision v001 `
   --cover-revision v001 `
   --script-revision v001 `
-  --material-revision v001
+  --material-revision v001 `
+  --allow-edge-tts-data-transfer
 ```
 
 Review the plan, then add `--execute`. One branch failing does not cancel or roll back a successful independent branch. After reviewing and approving the rendered video and social copy, plan and execute the three social stages:
@@ -122,5 +128,28 @@ uv run acp retry --product <product> --stage social:douyin --execute
 ```
 
 Retry is accepted only when that stage's latest attempt is `failed` or `waiting_for_user`. `unknown`, `partial`, and already successful outcomes require reconciliation or a new explicitly approved revision; the CLI will not replay them.
+
+After personally checking the destination, append—not overwrite—a reconciliation record. The first command is a dry-run:
+
+```powershell
+uv run acp reconcile --product <product> --stage social:douyin --outcome absent --evidence "Checked creator center; no matching submission exists."
+uv run acp reconcile --product <product> --stage social:douyin --outcome absent --evidence "Checked creator center; no matching submission exists." --execute --confirmed-by-user
+```
+
+Only `unknown` or interrupted work can be reconciled as absent. A `partial` website/WeChat result cannot be erased into an absent result.
+
+## Artifact integrity and legacy Products
+
+Every new revision contains `.artifact.json` with file sizes and SHA-256 hashes. Artifact approvals and publication approvals bind those hashes, so changing a file after approval blocks preview, rendering, or publication. `acp product status --json` reports revision integrity.
+
+Revisions created by an older development build have no manifest. After reviewing their current local bytes, seal them explicitly without granting approval:
+
+```powershell
+uv run acp artifact seal-legacy --product <product> --kind video-script --revision v001 --confirmed-by-user
+```
+
+Re-approve the sealed revision before using it. The command never infers or records approval.
+
+For a fully local narration path, supply both `--narration-audio` and `--subtitles`; Edge TTS is skipped. Omitting `--material-revision` requires `--allow-pexels-data-transfer`, because the approved search terms leave the machine. Edge TTS likewise requires `--allow-edge-tts-data-transfer` on every exact command.
 
 See [PRODUCT.md](docs/PRODUCT.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md), and [DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md).

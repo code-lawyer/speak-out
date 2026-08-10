@@ -135,7 +135,7 @@ class FfmpegExplainerRenderer:
                     "20",
                     "-pix_fmt",
                     "yuv420p",
-                    str(clip_path),
+                    clip_path.name,
                 ),
                 cwd=output_root,
             )

@@ -13,6 +13,8 @@ Store all files for one content Product inside `workspace/<date>-<slug>/`. Do no
 
 The public release article must not contain internal labels such as “原始记录”, “原文出处”, “研究笔记”, or “供参考”. Do not include external links unless the user explicitly approves links for that article.
 
+Store those raw notes and sources in an immutable `source/vNNN` revision instead. Every artifact revision includes a generated `.artifact.json`; do not edit it or any sealed file.
+
 The WeChat body contains text paragraphs only. Do not add inline article images.
 
 ## Required video artifacts

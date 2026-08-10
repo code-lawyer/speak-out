@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -17,7 +18,9 @@ def run(command: list[str]) -> None:
     subprocess.run(command, check=True, capture_output=True, text=True)
 
 
-def test_ffmpeg_renderer_outputs_inspected_1080p_h264_with_narration_and_subtitles(tmp_path):
+def test_ffmpeg_renderer_outputs_inspected_1080p_h264_with_narration_and_subtitles(
+    tmp_path, monkeypatch
+):
     source = tmp_path / "source.mp4"
     audio = tmp_path / "narration.m4a"
     subtitles = tmp_path / "subtitles.srt"
@@ -55,11 +58,12 @@ def test_ffmpeg_renderer_outputs_inspected_1080p_h264_with_narration_and_subtitl
         encoding="utf-8",
     )
 
+    monkeypatch.chdir(tmp_path)
     result = FfmpegExplainerRenderer().render_from_assets(
         materials=[source],
         narration_audio=audio,
         subtitles=subtitles,
-        output_root=tmp_path / "render",
+        output_root=Path("render"),
     )
 
     assert result.video_path.is_file()

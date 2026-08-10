@@ -43,6 +43,7 @@ def test_run_cli_is_dry_by_default_and_builds_independent_exact_commands(tmp_pat
             "v003",
             "--material-revision",
             "v004",
+            "--allow-edge-tts-data-transfer",
             "--video-revision",
             "v005",
             "--copy-revision",
@@ -54,6 +55,7 @@ def test_run_cli_is_dry_by_default_and_builds_independent_exact_commands(tmp_pat
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["mode"] == "dry-run"
+    assert payload["run_id"]
     assert [item["stage"] for item in payload["stages"]] == [
         "article",
         "video",
@@ -61,6 +63,9 @@ def test_run_cli_is_dry_by_default_and_builds_independent_exact_commands(tmp_pat
     ]
     assert all(item["state"] == "planned" for item in payload["stages"])
     assert "--json" in payload["stages"][0]["args"]
+    assert "--execute" in payload["stages"][0]["args"]
+    assert "--allow-edge-tts-data-transfer" in payload["stages"][1]["args"]
+    assert "--execute" in payload["stages"][2]["args"]
     assert StageAttemptLedger(product.root).list() == []
 
 
@@ -150,3 +155,74 @@ def test_product_status_includes_stage_attempt_history(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["stageAttempts"][0]["stage"] == "video"
     assert payload["stageAttempts"][0]["state"] == "failed"
+    assert payload["stageAttempts"][0]["runId"]
+
+
+def test_reconcile_cli_requires_confirmation_and_unblocks_unknown_as_absent(tmp_path):
+    product = create_product(tmp_path)
+    ledger = StageAttemptLedger(product.root)
+    unknown = ledger.start(
+        "article",
+        "article-key",
+        ("article", "publish", "--json"),
+    )
+    ledger.finish(unknown.id, StageState.UNKNOWN, 1, {"state": "unknown"})
+
+    preview = CliRunner().invoke(
+        app,
+        [
+            "reconcile",
+            "--product",
+            str(product.root),
+            "--stage",
+            "article",
+            "--outcome",
+            "absent",
+            "--evidence",
+            "VPS and website checked; article is absent.",
+            "--json",
+        ],
+    )
+    assert preview.exit_code == 0, preview.output
+    assert json.loads(preview.stdout)["mode"] == "dry-run"
+    assert len(ledger.list()) == 1
+
+    denied = CliRunner().invoke(
+        app,
+        [
+            "reconcile",
+            "--product",
+            str(product.root),
+            "--stage",
+            "article",
+            "--outcome",
+            "absent",
+            "--evidence",
+            "VPS and website checked; article is absent.",
+            "--execute",
+            "--json",
+        ],
+    )
+    assert denied.exit_code != 0
+    assert "--confirmed-by-user" in denied.output
+
+    applied = CliRunner().invoke(
+        app,
+        [
+            "reconcile",
+            "--product",
+            str(product.root),
+            "--stage",
+            "article",
+            "--outcome",
+            "absent",
+            "--evidence",
+            "VPS and website checked; article is absent.",
+            "--execute",
+            "--confirmed-by-user",
+            "--json",
+        ],
+    )
+    assert applied.exit_code == 0, applied.output
+    assert json.loads(applied.stdout)["stages"][0]["state"] == "failed"
+    assert ledger.latest("article").output["reconciliation"]["evidence"].startswith("VPS")

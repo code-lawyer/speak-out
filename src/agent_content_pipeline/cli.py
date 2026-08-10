@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import random
+import shutil
 import sys
 import time
 from datetime import UTC, date, datetime
@@ -17,7 +18,9 @@ from .config import LocalConfig
 from .diagnostics import SystemDoctor
 from .pipeline import (
     ArticlePublicationWorkflow,
+    article_publication_content_digest,
     article_publication_approval_key,
+    social_publication_content_digest,
     social_publication_approval_key,
 )
 from .publishing.article import (
@@ -30,6 +33,8 @@ from .publishing.article import (
 )
 from .orchestration import (
     PipelineOrchestrator,
+    ReconciliationNotAllowed,
+    ReconciliationOutcome,
     RetryNotAllowed,
     StageCommand,
 )
@@ -42,7 +47,7 @@ from .validation import (
 )
 from .video.spec import VideoScriptSpec
 from .video.materials import PexelsMaterialSource
-from .video.narration import EdgeTtsNarrator
+from .video.narration import EdgeTtsNarrator, NarrationResult
 from .video.renderer import FfmpegExplainerRenderer
 from .browser.cdp import CdpWebSocketClient, ChromePageController
 from .browser.chrome import LocalChromeCdpDriver
@@ -52,10 +57,14 @@ from .social.models import (
     SocialPlatform,
     SocialPostSpec,
     SocialPublicationState,
+    SocialPublishResult,
 )
 from .workspace import (
     ArtifactKind,
+    ArtifactIntegrityError,
+    ArtifactRevision,
     ArtifactRevisionRequest,
+    Product,
     ProductCreateRequest,
     ProductWorkspace,
 )
@@ -64,6 +73,18 @@ from .workspace import (
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _verified_artifact(
+    workspace: ProductWorkspace,
+    product: Product,
+    kind: ArtifactKind,
+    revision: str,
+) -> ArtifactRevision:
+    try:
+        return workspace.verify_revision(product, kind, revision)
+    except ArtifactIntegrityError as error:
+        raise typer.BadParameter(str(error), param_hint="--revision") from error
 
 
 app = typer.Typer(
@@ -139,7 +160,10 @@ def preview_article(
     cover_revision: Annotated[str, typer.Option(help="Cover revision.")],
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
-    product = ProductWorkspace(product_root.parent).load(product_root)
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    _verified_artifact(workspace, product, ArtifactKind.ARTICLE, article_revision)
+    _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
     article_root = product.root / "article" / article_revision
     cover_root = product.root / "cover" / cover_revision
     markdown = (article_root / "article.mdx").read_text(encoding="utf-8")
@@ -205,7 +229,25 @@ def approve_article_publication(
 ) -> None:
     if not confirmed_by_user:
         raise typer.BadParameter("explicit --confirmed-by-user is required")
-    product = ProductWorkspace(product_root.parent).load(product_root)
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    article = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.ARTICLE,
+        article_revision,
+    )
+    cover = _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
+    approvals = ApprovalLedger(product.root)
+    missing_artifact_approvals = []
+    if not approvals.has(ApprovalScope.ARTICLE, article_revision, article.digest):
+        missing_artifact_approvals.append(f"article:{article_revision}")
+    if not approvals.has(ApprovalScope.COVER, cover_revision, cover.digest):
+        missing_artifact_approvals.append(f"cover:{cover_revision}")
+    if missing_artifact_approvals:
+        raise typer.BadParameter(
+            "missing exact artifact approval: " + ", ".join(missing_artifact_approvals)
+        )
     destination_slug = target_slug or product.manifest.slug
     if destination_slug != product.manifest.slug and not allow_duplicate_site:
         raise typer.BadParameter(
@@ -218,7 +260,17 @@ def approve_article_publication(
         destination_slug,
         True,
     )
-    approval = ApprovalLedger(product.root).record(ApprovalScope.ARTICLE_PUBLICATION, key)
+    publication_digest = article_publication_content_digest(
+        article.digest,
+        cover.digest,
+        destination_slug,
+        True,
+    )
+    approval = approvals.record(
+        ApprovalScope.ARTICLE_PUBLICATION,
+        key,
+        publication_digest,
+    )
     payload = {
         "ok": True,
         "approval": {"scope": approval.scope.value, "revision": approval.revision},
@@ -246,9 +298,14 @@ def publish_article(
             help="Acknowledge that an override slug creates a duplicate website article.",
         ),
     ] = False,
+    execute: Annotated[
+        bool,
+        typer.Option("--execute", help="Send the approved bundle to the configured VPS."),
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
-    product = ProductWorkspace(product_root.parent).load(product_root)
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
     destination_slug = target_slug or product.manifest.slug
     if destination_slug != product.manifest.slug and not allow_duplicate_site:
         raise typer.BadParameter(
@@ -256,8 +313,15 @@ def publish_article(
             "explicit --allow-duplicate-site is required"
         )
 
-    article_root = product.root / "article" / article_revision
-    cover_root = product.root / "cover" / cover_revision
+    article = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.ARTICLE,
+        article_revision,
+    )
+    cover = _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
+    article_root = article.root
+    cover_root = cover.root
     spec = ArticlePublicationSpec(
         markdown=(article_root / "article.mdx").read_text(encoding="utf-8"),
         source_slug=product.manifest.slug,
@@ -273,6 +337,61 @@ def publish_article(
         timeout_seconds=website.request_timeout_seconds,
     )
     preview = publisher.preview(spec)
+    key = article_publication_approval_key(
+        article_revision,
+        cover_revision,
+        destination_slug,
+        True,
+    )
+    publication_digest = article_publication_content_digest(
+        article.digest,
+        cover.digest,
+        destination_slug,
+        True,
+    )
+    if not execute:
+        approvals = ApprovalLedger(product.root)
+        missing = [
+            f"{scope.value}:{revision}"
+            for scope, revision, digest in (
+                (ApprovalScope.ARTICLE, article_revision, article.digest),
+                (ApprovalScope.COVER, cover_revision, cover.digest),
+                (ApprovalScope.ARTICLE_PUBLICATION, key, publication_digest),
+            )
+            if not approvals.has(scope, revision, digest)
+        ]
+        prior = PublicationLedger(product.root).get_state("website-wechat", key)
+        blocked = bool(missing or prior in {"succeeded", "partial", "unknown"})
+        payload = {
+            "ok": not blocked,
+            "mode": "dry-run",
+            "state": "blocked" if blocked else "planned",
+            "endpoint": preview.endpoint,
+            "sourceSlug": preview.source_slug,
+            "slug": preview.target_slug,
+            "site": "ready",
+            "wechat": "ready",
+            "cover": "ready",
+            "missingApprovals": missing,
+            "priorState": prior,
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False))
+        else:
+            typer.echo(f"Article publication: {payload['state']}")
+            typer.echo("No network request was sent. Add --execute only after review.")
+        return
+    exact_approvals = ApprovalLedger(product.root)
+    if not exact_approvals.has(ApprovalScope.ARTICLE, article_revision, article.digest):
+        raise typer.BadParameter(f"exact article approval is missing: {article_revision}")
+    if not exact_approvals.has(ApprovalScope.COVER, cover_revision, cover.digest):
+        raise typer.BadParameter(f"exact cover approval is missing: {cover_revision}")
+    if not exact_approvals.has(
+        ApprovalScope.ARTICLE_PUBLICATION,
+        key,
+        publication_digest,
+    ):
+        raise typer.BadParameter("exact article publication approval is missing")
     result = ArticlePublicationWorkflow(ApprovalLedger(product.root), publisher).publish(
         spec,
         article_revision=article_revision,
@@ -324,6 +443,10 @@ def _build_stage_commands(
     script_revision: str | None,
     material_revision: str | None,
     bgm_directory: Path | None,
+    narration_audio: Path | None,
+    subtitles: Path | None,
+    allow_edge_tts_data_transfer: bool,
+    allow_pexels_data_transfer: bool,
     video_revision: str | None,
     copy_revision: str | None,
 ) -> tuple[StageCommand, ...]:
@@ -373,7 +496,7 @@ def _build_stage_commands(
                 args += ("--target-slug", target_slug)
             if allow_duplicate_site:
                 args += ("--allow-duplicate-site",)
-            args += ("--json",)
+            args += ("--execute", "--json")
             key = article_publication_approval_key(
                 article_revision,
                 cover_revision,
@@ -400,6 +523,14 @@ def _build_stage_commands(
                 args += ("--material-revision", material_revision)
             if bgm_directory is not None:
                 args += ("--bgm-directory", str(bgm_directory.resolve()))
+            if narration_audio is not None:
+                args += ("--narration-audio", str(narration_audio.resolve()))
+            if subtitles is not None:
+                args += ("--subtitles", str(subtitles.resolve()))
+            if allow_edge_tts_data_transfer:
+                args += ("--allow-edge-tts-data-transfer",)
+            if allow_pexels_data_transfer:
+                args += ("--allow-pexels-data-transfer",)
             args += ("--json",)
             key = _stage_command_key(stage, args)
         else:
@@ -422,6 +553,7 @@ def _build_stage_commands(
                 video_revision,
                 "--copy-revision",
                 copy_revision,
+                "--execute",
                 "--json",
             )
             key = social_publication_approval_key(video_revision, copy_revision, platform)
@@ -458,6 +590,28 @@ def run_pipeline(
     script_revision: Annotated[str | None, typer.Option(help="Approved video script.")] = None,
     material_revision: Annotated[str | None, typer.Option(help="Local material revision.")] = None,
     bgm_directory: Annotated[Path | None, typer.Option(help="Optional BGM directory.")] = None,
+    narration_audio: Annotated[
+        Path | None,
+        typer.Option(help="Optional local narration audio; requires --subtitles."),
+    ] = None,
+    subtitles: Annotated[
+        Path | None,
+        typer.Option(help="Optional local SRT; requires --narration-audio."),
+    ] = None,
+    allow_edge_tts_data_transfer: Annotated[
+        bool,
+        typer.Option(
+            "--allow-edge-tts-data-transfer",
+            help="Acknowledge that narration text will be sent to Microsoft Edge TTS.",
+        ),
+    ] = False,
+    allow_pexels_data_transfer: Annotated[
+        bool,
+        typer.Option(
+            "--allow-pexels-data-transfer",
+            help="Acknowledge that material search terms will be sent to Pexels.",
+        ),
+    ] = False,
     video_revision: Annotated[str | None, typer.Option(help="Approved video revision.")] = None,
     copy_revision: Annotated[str | None, typer.Option(help="Exact social copy revision.")] = None,
     execute: Annotated[
@@ -477,6 +631,10 @@ def run_pipeline(
         script_revision=script_revision,
         material_revision=material_revision,
         bgm_directory=bgm_directory,
+        narration_audio=narration_audio,
+        subtitles=subtitles,
+        allow_edge_tts_data_transfer=allow_edge_tts_data_transfer,
+        allow_pexels_data_transfer=allow_pexels_data_transfer,
         video_revision=video_revision,
         copy_revision=copy_revision,
     )
@@ -515,6 +673,50 @@ def retry_pipeline_stage(
         raise typer.Exit(code=1)
 
 
+@app.command("reconcile")
+def reconcile_pipeline_stage(
+    product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
+    stage: Annotated[str, typer.Option(help="Exact unknown, running, or partial stage.")],
+    outcome: Annotated[
+        ReconciliationOutcome,
+        typer.Option(help="Verified destination outcome: absent or succeeded."),
+    ],
+    evidence: Annotated[
+        str,
+        typer.Option(
+            help="Local note describing how the destination was checked; no credentials."
+        ),
+    ],
+    execute: Annotated[
+        bool,
+        typer.Option("--execute", help="Append the reconciliation record."),
+    ] = False,
+    confirmed_by_user: Annotated[
+        bool,
+        typer.Option(
+            "--confirmed-by-user",
+            help="Assert the user personally confirmed the external evidence.",
+        ),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    ProductWorkspace(product_root.parent).load(product_root)
+    if execute and not confirmed_by_user:
+        raise typer.BadParameter(
+            "explicit --confirmed-by-user is required to apply reconciliation"
+        )
+    try:
+        result = PipelineOrchestrator(StageAttemptLedger(product_root)).reconcile(
+            stage,
+            outcome,
+            evidence=evidence,
+            execute=execute,
+        )
+    except ReconciliationNotAllowed as error:
+        raise typer.BadParameter(str(error), param_hint="--stage") from error
+    _emit_pipeline_result(result, json_output)
+
+
 @approval_app.command("record")
 def record_approval(
     product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
@@ -531,7 +733,24 @@ def record_approval(
 ) -> None:
     if not confirmed_by_user:
         raise typer.BadParameter("explicit --confirmed-by-user is required")
-    approval = ApprovalLedger(product_root).record(scope, revision)
+    artifact_scope = {
+        ApprovalScope.ARTICLE: ArtifactKind.ARTICLE,
+        ApprovalScope.COVER: ArtifactKind.COVER,
+        ApprovalScope.VIDEO_SCRIPT: ArtifactKind.VIDEO_SCRIPT,
+        ApprovalScope.VIDEO: ArtifactKind.VIDEO_RENDER,
+    }
+    if scope not in artifact_scope:
+        raise typer.BadParameter(
+            "use the dedicated publication approval command for publication scopes",
+            param_hint="--scope",
+        )
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    try:
+        artifact = workspace.verify_revision(product, artifact_scope[scope], revision)
+    except ArtifactIntegrityError as error:
+        raise typer.BadParameter(str(error), param_hint="--revision") from error
+    approval = ApprovalLedger(product_root).record(scope, revision, artifact.digest)
     payload = {
         "ok": True,
         "approval": {"scope": approval.scope.value, "revision": approval.revision},
@@ -588,6 +807,85 @@ def add_article_revision(
         typer.echo(json.dumps(payload, ensure_ascii=False))
         return
     typer.echo(f"Added article {revision.revision}: {revision.root}")
+
+
+@artifact_app.command("add-source")
+def add_source_revision(
+    product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
+    sources: Annotated[
+        list[Path],
+        typer.Option("--source", help="Source note or input file; repeatable."),
+    ],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    files: dict[str, bytes] = {}
+    for source in sources:
+        if not source.is_file():
+            raise typer.BadParameter(f"source file is missing: {source}", param_hint="--source")
+        if source.name in files:
+            raise typer.BadParameter(
+                f"source filenames must be unique: {source.name}",
+                param_hint="--source",
+            )
+        files[source.name] = source.read_bytes()
+    if not files:
+        raise typer.BadParameter("at least one --source is required", param_hint="--source")
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    revision = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(kind=ArtifactKind.SOURCE, files=files),
+    )
+    payload = {
+        "ok": True,
+        "artifact": {
+            "kind": revision.kind.value,
+            "revision": revision.revision,
+            "root": str(revision.root),
+        },
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    typer.echo(f"Added source notes {revision.revision}: {revision.root}")
+
+
+@artifact_app.command("seal-legacy")
+def seal_legacy_artifact_revision(
+    product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
+    kind: Annotated[ArtifactKind, typer.Option(help="Existing artifact kind.")],
+    revision: Annotated[str, typer.Option(help="Existing legacy revision.")],
+    confirmed_by_user: Annotated[
+        bool,
+        typer.Option(
+            "--confirmed-by-user",
+            help="Confirm that the current local bytes are the intended migration baseline.",
+        ),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    if not confirmed_by_user:
+        raise typer.BadParameter("explicit --confirmed-by-user is required")
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    try:
+        artifact = workspace.seal_legacy_revision(product, kind, revision)
+    except ArtifactIntegrityError as error:
+        raise typer.BadParameter(str(error), param_hint="--revision") from error
+    payload = {
+        "ok": True,
+        "artifact": {
+            "kind": artifact.kind.value,
+            "revision": artifact.revision,
+            "root": str(artifact.root),
+            "digest": artifact.digest,
+        },
+        "approvalRecorded": False,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    typer.echo(f"Sealed legacy {kind.value}:{revision} without recording approval.")
 
 
 @artifact_app.command("add-cover")
@@ -757,22 +1055,81 @@ def render_video(
         Path | None,
         typer.Option(help="Optional directory; one audio file is selected randomly."),
     ] = None,
+    narration_audio: Annotated[
+        Path | None,
+        typer.Option(help="Local narration audio; use together with --subtitles."),
+    ] = None,
+    subtitles: Annotated[
+        Path | None,
+        typer.Option(help="Local SRT subtitles; use together with --narration-audio."),
+    ] = None,
+    allow_edge_tts_data_transfer: Annotated[
+        bool,
+        typer.Option(
+            "--allow-edge-tts-data-transfer",
+            help="Acknowledge sending the approved narration text to Microsoft Edge TTS.",
+        ),
+    ] = False,
+    allow_pexels_data_transfer: Annotated[
+        bool,
+        typer.Option(
+            "--allow-pexels-data-transfer",
+            help="Acknowledge sending material search terms to Pexels.",
+        ),
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
     workspace = ProductWorkspace(product_root.parent)
     product = workspace.load(product_root)
-    if not ApprovalLedger(product.root).has(ApprovalScope.VIDEO_SCRIPT, script_revision):
+    script_artifact = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.VIDEO_SCRIPT,
+        script_revision,
+    )
+    if not ApprovalLedger(product.root).has(
+        ApprovalScope.VIDEO_SCRIPT,
+        script_revision,
+        script_artifact.digest,
+    ):
         raise typer.BadParameter(
             f"explicit video-script approval is required for {script_revision}"
         )
-    script_path = product.root / "video" / "script" / script_revision / "script.json"
+    script_path = script_artifact.root / "script.json"
     spec = VideoScriptSpec.model_validate_json(script_path.read_text(encoding="utf-8"))
     settings = LocalConfig(project_root).load()
+    if (narration_audio is None) != (subtitles is None):
+        raise typer.BadParameter(
+            "--narration-audio and --subtitles must be supplied together"
+        )
+    local_narration = narration_audio is not None and subtitles is not None
+    if local_narration:
+        if not narration_audio.is_file():
+            raise typer.BadParameter(f"local narration audio is missing: {narration_audio}")
+        if not subtitles.is_file():
+            raise typer.BadParameter(f"local subtitles are missing: {subtitles}")
+    elif not allow_edge_tts_data_transfer:
+        raise typer.BadParameter(
+            "Edge TTS sends the approved narration text to Microsoft; explicit "
+            "--allow-edge-tts-data-transfer is required, or provide local "
+            "--narration-audio and --subtitles"
+        )
+    if material_revision is None and not allow_pexels_data_transfer:
+        raise typer.BadParameter(
+            "Pexels receives the approved material search terms; explicit "
+            "--allow-pexels-data-transfer is required, or provide --material-revision"
+        )
     staging = product.root / "video" / "work" / f"render-{uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=False)
 
     if material_revision is not None:
-        material_root = product.root / "video" / "materials" / material_revision
+        material_artifact = _verified_artifact(
+            workspace,
+            product,
+            ArtifactKind.VIDEO_MATERIAL,
+            material_revision,
+        )
+        material_root = material_artifact.root
         material_paths = sorted(
             path
             for path in material_root.iterdir()
@@ -806,13 +1163,31 @@ def render_video(
             raise typer.BadParameter(f"BGM directory contains no supported audio: {bgm_directory}")
         bgm = random.SystemRandom().choice(candidates)
 
-    narration = EdgeTtsNarrator(
-        timeout_seconds=settings.tts.request_timeout_seconds
-    ).synthesize(
-        narration=spec.narration,
-        voice=settings.tts.voice,
-        output_root=staging / "narration",
-    )
+    if local_narration:
+        narration_root = staging / "narration"
+        narration_root.mkdir(parents=True)
+        local_audio = narration_root / f"narration{narration_audio.suffix.lower()}"
+        local_subtitles = narration_root / "subtitles.srt"
+        shutil.copy2(narration_audio, local_audio)
+        shutil.copy2(subtitles, local_subtitles)
+        (narration_root / "script.txt").write_text(
+            spec.narration + "\n",
+            encoding="utf-8",
+        )
+        narration = NarrationResult(
+            root=narration_root,
+            audio_path=local_audio,
+            subtitles_path=local_subtitles,
+            voice="local",
+        )
+    else:
+        narration = EdgeTtsNarrator(
+            timeout_seconds=settings.tts.request_timeout_seconds
+        ).synthesize(
+            narration=spec.narration,
+            voice=settings.tts.voice,
+            output_root=staging / "narration",
+        )
     rendered = FfmpegExplainerRenderer().render_from_assets(
         materials=material_paths,
         narration_audio=narration.audio_path,
@@ -825,7 +1200,8 @@ def render_video(
             {
                 "scriptRevision": script_revision,
                 "materialRevision": material_revision,
-                "voice": settings.tts.voice,
+                "voice": narration.voice,
+                "narrationSource": "local" if local_narration else "edge-tts",
                 "bgm": str(bgm) if bgm else None,
                 "profile": "landscape-explainer-v1",
             },
@@ -863,6 +1239,121 @@ def render_video(
     typer.echo(f"Rendered video {revision.revision}: {final_path}")
 
 
+@video_app.command("inspect")
+def inspect_video_revision(
+    product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
+    revision: Annotated[str, typer.Option(help="Exact video-render revision.")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    artifact = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        revision,
+    )
+    video_path = artifact.root / "output" / "final.mp4"
+    if not video_path.is_file():
+        raise typer.BadParameter(f"video revision is missing final.mp4: {revision}")
+    inspected = FfmpegExplainerRenderer().inspect(video_path)
+    payload = {
+        "ok": True,
+        "revision": revision,
+        "video": {
+            "path": str(video_path),
+            "width": inspected.width,
+            "height": inspected.height,
+            "codec": inspected.video_codec,
+            "hasAudio": inspected.has_audio,
+            "durationSeconds": inspected.duration_seconds,
+        },
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    typer.echo(f"Video {revision}: {video_path}")
+    typer.echo(
+        f"{inspected.width}x{inspected.height} {inspected.video_codec}, "
+        f"audio={'yes' if inspected.has_audio else 'no'}, "
+        f"duration={inspected.duration_seconds:.3f}s"
+    )
+
+
+@social_app.command("preview")
+def preview_social_publication(
+    product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
+    platform: Annotated[SocialPlatform, typer.Option(help="Target platform.")],
+    video_revision: Annotated[str, typer.Option(help="Exact video-render revision.")],
+    copy_revision: Annotated[str, typer.Option(help="Exact social-copy revision.")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    video = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        video_revision,
+    )
+    copy_artifact = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.SOCIAL_COPY,
+        copy_revision,
+    )
+    video_path = video.root / "output" / "final.mp4"
+    if not video_path.is_file():
+        raise typer.BadParameter(f"video revision is missing final.mp4: {video_revision}")
+    bundle = SocialCopyBundle.model_validate_json(
+        (copy_artifact.root / "copy.json").read_text(encoding="utf-8")
+    )
+    platform_copy = bundle.platforms[platform]
+    SocialPostSpec(
+        platform=platform,
+        title=platform_copy.title,
+        body=platform_copy.body,
+        tags=platform_copy.tags,
+        video_path=video_path,
+        category=platform_copy.category,
+    )
+    key = social_publication_approval_key(video_revision, copy_revision, platform)
+    publication_digest = social_publication_content_digest(
+        video.digest,
+        copy_artifact.digest,
+        platform,
+    )
+    approvals = ApprovalLedger(product.root)
+    payload = {
+        "ok": True,
+        "mode": "dry-run",
+        "target": "immediate-publication",
+        "platform": platform.value,
+        "video": str(video_path),
+        "videoRevision": video_revision,
+        "copyRevision": copy_revision,
+        "title": platform_copy.title,
+        "body": platform_copy.body,
+        "tags": platform_copy.tags,
+        "category": platform_copy.category,
+        "videoApproved": approvals.has(ApprovalScope.VIDEO, video_revision, video.digest),
+        "publicationApproved": approvals.has(
+            ApprovalScope.SOCIAL_PUBLICATION,
+            key,
+            publication_digest,
+        ),
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    typer.echo(f"Target: immediate {platform.value} publication")
+    typer.echo(f"Title: {platform_copy.title}")
+    typer.echo(f"Body: {platform_copy.body}")
+    typer.echo("Tags: " + ", ".join(platform_copy.tags))
+    typer.echo(f"Video: {video_path}")
+    typer.echo("No browser was opened and nothing was submitted.")
+
+
 @social_app.command("approve-publication")
 def approve_social_publication(
     product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
@@ -880,14 +1371,36 @@ def approve_social_publication(
 ) -> None:
     if not confirmed_by_user:
         raise typer.BadParameter("explicit --confirmed-by-user is required")
-    product = ProductWorkspace(product_root.parent).load(product_root)
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    video = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        video_revision,
+    )
+    copy_artifact = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.SOCIAL_COPY,
+        copy_revision,
+    )
     approvals = ApprovalLedger(product.root)
-    if not approvals.has(ApprovalScope.VIDEO, video_revision):
+    if not approvals.has(ApprovalScope.VIDEO, video_revision, video.digest):
         raise typer.BadParameter(
             f"the exact video must be approved first: video:{video_revision}"
         )
     key = social_publication_approval_key(video_revision, copy_revision, platform)
-    approval = approvals.record(ApprovalScope.SOCIAL_PUBLICATION, key)
+    publication_digest = social_publication_content_digest(
+        video.digest,
+        copy_artifact.digest,
+        platform,
+    )
+    approval = approvals.record(
+        ApprovalScope.SOCIAL_PUBLICATION,
+        key,
+        publication_digest,
+    )
     payload = {
         "ok": True,
         "platform": platform.value,
@@ -983,16 +1496,37 @@ def publish_social_video(
     platform: Annotated[SocialPlatform, typer.Option(help="Target platform.")],
     video_revision: Annotated[str, typer.Option(help="Approved video-render revision.")],
     copy_revision: Annotated[str, typer.Option(help="Approved social-copy revision.")],
+    execute: Annotated[
+        bool,
+        typer.Option("--execute", help="Open Chrome and submit the approved publication."),
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
     workspace = ProductWorkspace(product_root.parent)
     product = workspace.load(product_root)
+    video_artifact = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        video_revision,
+    )
+    copy_artifact = _verified_artifact(
+        workspace,
+        product,
+        ArtifactKind.SOCIAL_COPY,
+        copy_revision,
+    )
     approvals = ApprovalLedger(product.root)
     key = social_publication_approval_key(video_revision, copy_revision, platform)
+    publication_digest = social_publication_content_digest(
+        video_artifact.digest,
+        copy_artifact.digest,
+        platform,
+    )
     missing = []
-    if not approvals.has(ApprovalScope.VIDEO, video_revision):
+    if not approvals.has(ApprovalScope.VIDEO, video_revision, video_artifact.digest):
         missing.append(f"video:{video_revision}")
-    if not approvals.has(ApprovalScope.SOCIAL_PUBLICATION, key):
+    if not approvals.has(ApprovalScope.SOCIAL_PUBLICATION, key, publication_digest):
         missing.append(f"social-publication:{key}")
     if missing:
         raise typer.BadParameter("missing explicit approval: " + ", ".join(missing))
@@ -1007,8 +1541,8 @@ def publish_social_video(
             f"prior publication state is unknown; reconcile before retrying: {destination}:{key}"
         )
 
-    video_path = product.root / "video" / "renders" / video_revision / "output" / "final.mp4"
-    copy_path = product.root / "publish" / "copy" / copy_revision / "copy.json"
+    video_path = video_artifact.root / "output" / "final.mp4"
+    copy_path = copy_artifact.root / "copy.json"
     bundle = SocialCopyBundle.model_validate_json(copy_path.read_text(encoding="utf-8"))
     platform_copy = bundle.platforms[platform]
     spec = SocialPostSpec(
@@ -1021,6 +1555,25 @@ def publish_social_video(
     )
     if not video_path.is_file():
         raise typer.BadParameter(f"approved video file is missing: {video_path}")
+
+    if not execute:
+        payload = {
+            "ok": True,
+            "mode": "dry-run",
+            "state": "planned",
+            "platform": platform.value,
+            "video": str(video_path),
+            "title": spec.title,
+            "body": spec.body,
+            "tags": spec.tags,
+            "category": spec.category,
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False))
+        else:
+            typer.echo(f"{platform.value}: planned")
+            typer.echo("Chrome was not opened. Add --execute only after review.")
+        return
 
     settings = LocalConfig(project_root).load()
     configured_chrome = Path(settings.browser.chrome_path) if settings.browser.chrome_path else None
@@ -1039,16 +1592,45 @@ def publish_social_video(
     )
     session = driver.launch(platform=platform.value, start_url=contract.upload_url)
     cdp = CdpWebSocketClient(session.websocket_url)
+    timestamp = datetime.now(UTC)
+    screenshot_path: Path | None = None
+    page = None
+    result = SocialPublishResult(
+        platform=platform,
+        state=SocialPublicationState.UNKNOWN,
+        message="browser automation did not complete; reconcile before retrying",
+    )
     try:
-        page = ChromePageController.attach(cdp)
-        result = VisibleChromePlatformPublisher(platform).publish(page, spec)
+        try:
+            page = ChromePageController.attach(cdp)
+            result = VisibleChromePlatformPublisher(platform).publish(page, spec)
+        except Exception as error:
+            result = SocialPublishResult(
+                platform=platform,
+                state=SocialPublicationState.UNKNOWN,
+                message=(
+                    "browser automation was interrupted after opening the creator flow; "
+                    f"reconcile before retrying ({type(error).__name__})"
+                ),
+            )
     finally:
-        cdp.close()
+        if page is not None and result.state != SocialPublicationState.SUBMITTED:
+            candidate = product.root / "logs" / (
+                timestamp.isoformat().replace(":", "-").replace(".", "-")
+                + f"-{platform.value}.png"
+            )
+            try:
+                screenshot_path = page.screenshot(candidate)
+            except Exception:
+                screenshot_path = None
+        try:
+            cdp.close()
+        except Exception:
+            pass
 
     publications.record_state(destination, key, result.state.value)
     log_root = product.root / "logs"
     log_root.mkdir(exist_ok=True)
-    timestamp = datetime.now(UTC)
     log_path = log_root / (
         timestamp.isoformat().replace(":", "-").replace(".", "-")
         + f"-{platform.value}.json"
@@ -1065,6 +1647,11 @@ def publish_social_video(
                 "state": result.state.value,
                 "message": result.message,
                 "permalink": result.permalink,
+                "screenshotFile": (
+                    str(screenshot_path.relative_to(product.root))
+                    if screenshot_path is not None
+                    else None
+                ),
             },
             ensure_ascii=False,
             indent=2,
@@ -1079,6 +1666,11 @@ def publish_social_video(
         "message": result.message,
         "permalink": result.permalink,
         "logFile": str(log_path.relative_to(product.root)),
+        "screenshotFile": (
+            str(screenshot_path.relative_to(product.root))
+            if screenshot_path is not None
+            else None
+        ),
     }
     if json_output:
         typer.echo(json.dumps(payload, ensure_ascii=False))
@@ -1140,10 +1732,20 @@ def product_status(
             {"scope": item.scope.value, "revision": item.revision}
             for item in ApprovalLedger(product.root).list()
         ],
+        "artifacts": [
+            {
+                "kind": item.kind.value,
+                "revision": item.revision,
+                "root": str(item.root),
+                "integrity": "valid" if item.digest else "invalid-or-legacy",
+            }
+            for item in ProductWorkspace(product.root.parent).list_revisions(product)
+        ],
         "publications": PublicationLedger(product.root).list(),
         "stageAttempts": [
             {
                 "id": item.id,
+                "runId": item.run_id,
                 "stage": item.stage,
                 "idempotencyKey": item.idempotency_key,
                 "args": list(item.args),
@@ -1154,6 +1756,18 @@ def product_status(
                 "finishedAt": item.finished_at.isoformat() if item.finished_at else None,
             }
             for item in StageAttemptLedger(product.root).list()
+        ],
+        "runs": [
+            {
+                "runId": item.run_id,
+                "mode": item.mode,
+                "state": item.state.value,
+                "commands": list(item.commands),
+                "results": list(item.results),
+                "startedAt": item.started_at.isoformat(),
+                "finishedAt": item.finished_at.isoformat() if item.finished_at else None,
+            }
+            for item in StageAttemptLedger(product.root).list_runs()
         ],
     }
     if json_output:

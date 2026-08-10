@@ -22,7 +22,7 @@ Pipeline Module
 
 ## Domain model
 
-The Product is the durable aggregate. Its user-readable `product.toml` identifies the Product and selected revisions. Its SQLite state records approvals, independent publication results, stage attempts, exact replay commands, and redacted results.
+The Product is the durable aggregate. Its user-readable `product.toml` identifies the Product. Revision directories contain `.artifact.json` SHA-256 manifests; SQLite approvals retain the content digest of the exact artifact or publication bundle. SQLite also records independent publication results, run IDs, stage attempts, exact replay commands, append-only reconciliation evidence, and redacted results.
 
 Every side-effecting stage uses an idempotency key derived from Product ID, artifact revision, destination, and intended action. A successful publication is terminal unless the user explicitly creates a new revision or duplicate-publication override.
 
@@ -67,3 +67,5 @@ Stage plans and attempts use `planned`, `running`, `waiting_for_user`, `succeede
 Website/WeChat, rendering, and each social platform are separate publication domains. Success in one domain never implies success in another and is never rolled back by another domain's failure.
 
 `acp run` is dry-run by default. Execution persists each exact child command and continues other independent stages after a failure. `acp retry` is deliberately narrower: it replays only the latest exact command for a named `failed` or `waiting_for_user` stage. `unknown`, `partial`, and successful results cannot be replayed until externally reconciled or replaced by a newly approved revision.
+
+`acp reconcile` never queries or mutates a destination. It records the user's external verification as a new Run. `unknown` or interrupted work may be reconciled as absent, which enables one exact retry; `unknown`, interrupted, or partial work may be reconciled as succeeded. Historical attempts remain unchanged.

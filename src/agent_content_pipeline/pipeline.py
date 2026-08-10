@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Protocol
 
 from .publishing.article import (
@@ -57,6 +59,39 @@ def social_publication_approval_key(
     platform: SocialPlatform,
 ) -> str:
     return f"{video_revision}+{copy_revision}+{platform.value}+publish"
+
+
+def article_publication_content_digest(
+    article_digest: str,
+    cover_digest: str,
+    target_slug: str,
+    push_to_wechat: bool,
+) -> str:
+    return _approval_content_digest(
+        "article-publication",
+        article_digest,
+        cover_digest,
+        target_slug,
+        "wechat" if push_to_wechat else "site",
+    )
+
+
+def social_publication_content_digest(
+    video_digest: str,
+    copy_digest: str,
+    platform: SocialPlatform,
+) -> str:
+    return _approval_content_digest(
+        "social-publication",
+        video_digest,
+        copy_digest,
+        platform.value,
+    )
+
+
+def _approval_content_digest(*parts: str) -> str:
+    canonical = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 class ArticlePublicationWorkflow:
