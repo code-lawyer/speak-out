@@ -19,4 +19,3 @@ def test_redaction_covers_sensitive_keys_headers_and_known_secret_values():
     assert "private-cookie" not in rendered
     assert "explicit-secret-value" not in rendered
     assert redacted["accessToken"] == "[REDACTED]"
-

@@ -45,4 +45,3 @@ def redact_sensitive_data(
         return item
 
     return redact(value)
-
