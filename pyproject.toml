@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-content-pipeline"
+version = "0.1.0"
+description = "Local-first article, explainer-video, and multi-platform publishing pipeline for AI agents."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Agent Content Pipeline contributors" }]
+dependencies = [
+  "edge-tts>=7.2,<8",
+  "httpx[socks]>=0.28,<1",
+  "pydantic>=2.12,<3",
+  "typer>=0.20,<1",
+  "websocket-client>=1.8,<2",
+]
+
+[project.scripts]
+acp = "agent_content_pipeline.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=9,<10",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_content_pipeline"]

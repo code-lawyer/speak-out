@@ -1,0 +1,4 @@
+interface:
+  display_name: "Content Pipeline"
+  short_description: "Create, render, approve, and publish one content product"
+  default_prompt: "Use $content-pipeline to turn this article into approved website, WeChat, video, and social-platform publications."

@@ -1,0 +1,124 @@
+import base64
+
+import pytest
+import httpx
+
+from agent_content_pipeline.publishing.article import (
+    ArticlePublicationSpec,
+    ArticleValidationError,
+    FixedIpVpsPublisher,
+)
+
+
+def test_article_preview_preserves_the_proven_vps_request_contract():
+    cover = b"\x89PNG\r\n\x1a\ncontract-fixture"
+    spec = ArticlePublicationSpec(
+        markdown="---\ntitle: 斩我斋：测试文章\n---\n正文\n",
+        source_slug="test-article",
+        target_slug="test-article",
+        wechat_html='<p style="font-size:16px">测试</p>',
+        cover_png=cover,
+        push_to_wechat=True,
+    )
+
+    preview = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="must-not-appear-in-preview",
+    ).preview(spec)
+
+    assert preview.endpoint == "https://hillward.top/api/articles"
+    assert preview.request_body == {
+        "markdown": spec.markdown,
+        "slug": "test-article",
+        "wechatHTML": spec.wechat_html,
+        "pushToWechat": True,
+        "coverImageBase64": (
+            "data:image/png;base64," + base64.b64encode(cover).decode("ascii")
+        ),
+    }
+    assert "must-not-appear-in-preview" not in preview.model_dump_json()
+
+
+def test_wechat_preview_refuses_to_continue_without_a_cover():
+    spec = ArticlePublicationSpec(
+        markdown="---\ntitle: 斩我斋：测试文章\n---\n正文\n",
+        source_slug="test-article",
+        target_slug="test-article",
+        wechat_html="<p>测试</p>",
+        cover_png=None,
+        push_to_wechat=True,
+    )
+
+    with pytest.raises(ArticleValidationError) as error:
+        FixedIpVpsPublisher(
+            endpoint="https://hillward.top/api/articles",
+            bearer_token="secret",
+        ).preview(spec)
+
+    assert error.value.issues == ("WeChat cover is required",)
+
+
+def test_article_publish_posts_the_contract_without_exposing_the_secret():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers["Authorization"]
+        captured["body"] = request.read()
+        return httpx.Response(
+            200,
+            json={"success": True, "wechatPushed": True},
+            request=request,
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="local-test-secret",
+        http_client=client,
+    )
+    preview = publisher.preview(
+        ArticlePublicationSpec(
+            markdown="---\ntitle: 斩我斋：测试文章\n---\n正文\n",
+            source_slug="test-article",
+            target_slug="test-article",
+            wechat_html="<p>测试</p>",
+            cover_png=b"png",
+            push_to_wechat=True,
+        )
+    )
+
+    result = publisher.publish(preview)
+
+    assert captured["authorization"] == "Bearer local-test-secret"
+    assert result.state == "succeeded"
+    assert result.http_status == 200
+    assert result.response == {"success": True, "wechatPushed": True}
+    assert "local-test-secret" not in result.model_dump_json()
+
+
+def test_article_publish_timeout_is_unknown_instead_of_safe_to_retry():
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("response was lost", request=request)
+
+    publisher = FixedIpVpsPublisher(
+        endpoint="https://hillward.top/api/articles",
+        bearer_token="local-test-secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(timeout)),
+    )
+    preview = publisher.preview(
+        ArticlePublicationSpec(
+            markdown="---\ntitle: 斩我斋：测试文章\n---\n正文\n",
+            source_slug="test-article",
+            target_slug="test-article",
+            wechat_html="<p>测试</p>",
+            cover_png=b"png",
+            push_to_wechat=True,
+        )
+    )
+
+    result = publisher.publish(preview)
+
+    assert result.state == "unknown"
+    assert result.http_status is None
+    assert result.error == "request timed out; remote publish state is unknown"
+    assert "local-test-secret" not in result.model_dump_json()
