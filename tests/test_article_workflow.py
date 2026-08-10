@@ -13,7 +13,12 @@ from agent_content_pipeline.pipeline import (
     article_publication_approval_key,
     article_publication_content_digest,
 )
-from agent_content_pipeline.publishing.article import FixedIpVpsPublisher
+from agent_content_pipeline.publishing.article import (
+    ArticlePublishPreview,
+    ArticlePublishResult,
+    FixedIpVpsPublisher,
+    PublicationState,
+)
 from agent_content_pipeline.state import ApprovalLedger, ApprovalScope, PublicationLedger
 from agent_content_pipeline.workspace import (
     ArtifactIntegrityError,
@@ -278,6 +283,33 @@ def test_pipeline_detects_changed_revision_bytes_before_constructing_request(tmp
 
     with pytest.raises(ArtifactIntegrityError):
         publish_v001(workflow_for(workspace, product, MustNotPublish()))
+
+
+def test_pipeline_publishes_the_verified_snapshot_if_files_change_after_read(tmp_path):
+    workspace, product, article, cover = create_verified_product(tmp_path)
+    record_exact_approvals(ApprovalLedger(product.root), article, cover)
+    seen_markdown = []
+
+    class MutatingPublisher:
+        def preview(self, spec):
+            seen_markdown.append(spec.markdown)
+            (article.root / "article.mdx").write_text("tampered-after-snapshot", encoding="utf-8")
+            return ArticlePublishPreview(
+                endpoint="https://example.com/api/articles",
+                source_slug=spec.source_slug,
+                target_slug=spec.target_slug,
+                duplicate_site=False,
+                request_body={"markdown": spec.markdown},
+            )
+
+        def publish(self, preview):
+            assert "tampered-after-snapshot" not in preview.request_body["markdown"]
+            return ArticlePublishResult(state=PublicationState.SUCCEEDED)
+
+    result = publish_v001(workflow_for(workspace, product, MutatingPublisher()))
+
+    assert result.state == PublicationState.SUCCEEDED
+    assert seen_markdown and "斩我斋：测试文章" in seen_markdown[0]
 
 
 def test_pipeline_resolves_claim_when_local_preview_fails_before_external_seam(tmp_path):

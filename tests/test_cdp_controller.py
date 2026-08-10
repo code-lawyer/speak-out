@@ -59,4 +59,5 @@ def test_page_controller_uses_cdp_for_visible_form_and_file_interactions(tmp_pat
         if item[0] == "Runtime.evaluate" and "chipSelectors" in item[1]["expression"]
     )
     assert "data-tag" in verification_call[1]["expression"]
+    assert "approved.length === chips.length" in verification_call[1]["expression"]
     assert all(item[2] == "session-1" for item in cdp.calls[2:])

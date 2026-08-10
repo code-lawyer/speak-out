@@ -181,6 +181,23 @@ def test_bilibili_publisher_never_submits_when_tag_chips_cannot_be_verified(tmp_
     assert page.submit_clicked is False
 
 
+def test_bilibili_publisher_rejects_extra_unapproved_tag_chips(tmp_path):
+    class ExtraChipPage(FakePage):
+        def fill_tags(self, selector, tags, chip_selectors):
+            self.tags.extend([*tags, "未批准标签"])
+            return False
+
+    page = ExtraChipPage(logged_in=True)
+    result = VisibleChromePlatformPublisher(SocialPlatform.BILIBILI).publish(
+        page,
+        post(tmp_path, SocialPlatform.BILIBILI),
+    )
+
+    assert result.state == SocialPublicationState.FAILED
+    assert "tags" in result.message
+    assert page.submit_clicked is False
+
+
 def test_user_handoff_before_submit_never_instructs_a_manual_publish(tmp_path):
     class MissingSubmitPage(FakePage):
         def evaluate(self, expression):

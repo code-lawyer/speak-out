@@ -70,6 +70,7 @@ from .workspace import (
     ArtifactIntegrityError,
     ArtifactRevision,
     ArtifactRevisionRequest,
+    ArtifactSnapshot,
     Product,
     ProductCreateRequest,
     ProductWorkspace,
@@ -89,6 +90,18 @@ def _verified_artifact(
 ) -> ArtifactRevision:
     try:
         return workspace.verify_revision(product, kind, revision)
+    except ArtifactIntegrityError as error:
+        raise typer.BadParameter(str(error), param_hint="--revision") from error
+
+
+def _verified_snapshot(
+    workspace: ProductWorkspace,
+    product: Product,
+    kind: ArtifactKind,
+    revision: str,
+) -> ArtifactSnapshot:
+    try:
+        return workspace.read_verified_revision(product, kind, revision)
     except ArtifactIntegrityError as error:
         raise typer.BadParameter(str(error), param_hint="--revision") from error
 
@@ -1500,7 +1513,7 @@ def preview_social_publication(
         ArtifactKind.VIDEO_RENDER,
         video_revision,
     )
-    copy_artifact = _verified_artifact(
+    copy_artifact = _verified_snapshot(
         workspace,
         product,
         ArtifactKind.SOCIAL_COPY,
@@ -1509,9 +1522,14 @@ def preview_social_publication(
     video_path = video.root / "output" / "final.mp4"
     if not video_path.is_file():
         raise typer.BadParameter(f"video revision is missing final.mp4: {video_revision}")
-    bundle = SocialCopyBundle.model_validate_json(
-        (copy_artifact.root / "copy.json").read_text(encoding="utf-8")
-    )
+    try:
+        preview_copy_json = copy_artifact.files["copy.json"].decode("utf-8")
+    except (KeyError, UnicodeError) as error:
+        raise typer.BadParameter(
+            "verified social-copy revision is missing UTF-8 copy.json",
+            param_hint="--copy-revision",
+        ) from error
+    bundle = SocialCopyBundle.model_validate_json(preview_copy_json)
     platform_copy = bundle.platforms[platform]
     SocialPostSpec(
         platform=platform,
@@ -1583,7 +1601,7 @@ def approve_social_publication(
         ArtifactKind.VIDEO_RENDER,
         video_revision,
     )
-    copy_artifact = _verified_artifact(
+    copy_artifact = _verified_snapshot(
         workspace,
         product,
         ArtifactKind.SOCIAL_COPY,
@@ -1743,7 +1761,7 @@ def publish_social_video(
         ArtifactKind.VIDEO_RENDER,
         video_revision,
     )
-    copy_artifact = _verified_artifact(
+    copy_artifact = _verified_snapshot(
         workspace,
         product,
         ArtifactKind.SOCIAL_COPY,
@@ -1780,8 +1798,14 @@ def publish_social_video(
         )
 
     video_path = video_artifact.root / "output" / "final.mp4"
-    copy_path = copy_artifact.root / "copy.json"
-    bundle = SocialCopyBundle.model_validate_json(copy_path.read_text(encoding="utf-8"))
+    try:
+        copy_json = copy_artifact.files["copy.json"].decode("utf-8")
+    except (KeyError, UnicodeError) as error:
+        raise typer.BadParameter(
+            "verified social-copy revision is missing UTF-8 copy.json",
+            param_hint="--copy-revision",
+        ) from error
+    bundle = SocialCopyBundle.model_validate_json(copy_json)
     platform_copy = bundle.platforms[platform]
     spec = SocialPostSpec(
         platform=platform,
@@ -1828,8 +1852,44 @@ def publish_social_video(
         project_root=project_root,
         chrome_path=configured_chrome,
     )
-    session = driver.launch(platform=platform.value, start_url=contract.upload_url)
-    cdp = CdpWebSocketClient(session.websocket_url)
+    staging_path = (
+        product.root / "publish" / ".staging" / f"{uuid4()}-{platform.value}.mp4"
+    )
+    try:
+        video_copy = workspace.copy_verified_file(
+            product,
+            ArtifactKind.VIDEO_RENDER,
+            video_revision,
+            "output/final.mp4",
+            staging_path,
+        )
+    except ArtifactIntegrityError as error:
+        raise typer.BadParameter(str(error), param_hint="--video-revision") from error
+    exact_publication_digest = social_publication_content_digest(
+        video_copy.revision_digest,
+        copy_artifact.digest,
+        platform,
+    )
+    exact_video_approved = approvals.has(
+        ApprovalScope.VIDEO,
+        video_revision,
+        video_copy.revision_digest,
+    )
+    exact_publication_approved = approvals.has(
+        ApprovalScope.SOCIAL_PUBLICATION,
+        key,
+        exact_publication_digest,
+    )
+    if not exact_video_approved or not exact_publication_approved:
+        video_copy.path.unlink(missing_ok=True)
+        raise typer.BadParameter("exact social publication approval changed before upload")
+    spec = spec.model_copy(update={"video_path": video_copy.path})
+    try:
+        session = driver.launch(platform=platform.value, start_url=contract.upload_url)
+        cdp = CdpWebSocketClient(session.websocket_url)
+    except BaseException:
+        video_copy.path.unlink(missing_ok=True)
+        raise
     timestamp = datetime.now(UTC)
     screenshot_path: Path | None = None
     page = None
@@ -1885,6 +1945,7 @@ def publish_social_video(
             cdp.close()
         except Exception:
             pass
+        video_copy.path.unlink(missing_ok=True)
 
     log_root = product.root / "logs"
     log_root.mkdir(exist_ok=True)

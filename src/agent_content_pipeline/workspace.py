@@ -78,6 +78,23 @@ class ArtifactRevision(BaseModel):
     digest: str | None = None
 
 
+class ArtifactSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: ArtifactKind
+    revision: str = Field(pattern=r"^v[0-9]{3,}$")
+    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    files: dict[str, bytes]
+
+
+class VerifiedFileCopy(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    path: Path
+    revision_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ProductWorkspace:
     """Create and locate Product directories without exposing path rules."""
 
@@ -196,7 +213,9 @@ class ProductWorkspace:
         root = product.root / self._ARTIFACT_PATHS[kind] / revision
         manifest_path = root / self._MANIFEST_NAME
         if not root.is_dir():
-            raise ArtifactIntegrityError((f"artifact revision is missing: {kind.value}:{revision}",))
+            raise ArtifactIntegrityError(
+                (f"artifact revision is missing: {kind.value}:{revision}",)
+            )
         if not manifest_path.is_file():
             raise ArtifactIntegrityError(
                 (f"artifact integrity manifest is missing: {kind.value}:{revision}",)
@@ -239,6 +258,149 @@ class ProductWorkspace:
             revision=revision,
             root=root,
             digest=actual_digest,
+        )
+
+    def read_verified_revision(
+        self,
+        product: Product,
+        kind: ArtifactKind,
+        revision: str,
+    ) -> ArtifactSnapshot:
+        """Read one immutable byte snapshot and verify those same bytes against its manifest."""
+
+        root = product.root / self._ARTIFACT_PATHS[kind] / revision
+        manifest_path = root / self._MANIFEST_NAME
+        if not root.is_dir():
+            raise ArtifactIntegrityError(
+                (f"artifact revision is missing: {kind.value}:{revision}",)
+            )
+        if not manifest_path.is_file():
+            raise ArtifactIntegrityError(
+                (f"artifact integrity manifest is missing: {kind.value}:{revision}",)
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            files = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in sorted(root.rglob("*"))
+                if path.is_file() and path.name != self._MANIFEST_NAME
+            }
+        except (OSError, ValueError) as error:
+            raise ArtifactIntegrityError(
+                (f"artifact snapshot could not be read: {kind.value}:{revision}",)
+            ) from error
+        expected_files = {
+            item.get("path"): item
+            for item in manifest.get("files", [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        actual_records = {
+            name: {
+                "path": name,
+                "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+            for name, content in files.items()
+        }
+        issues: list[str] = []
+        if manifest.get("kind") != kind.value:
+            issues.append(f"artifact kind mismatch: expected {kind.value}")
+        if manifest.get("revision") != revision:
+            issues.append(f"artifact revision mismatch: expected {revision}")
+        for missing in sorted(set(expected_files) - set(actual_records)):
+            issues.append(f"artifact file is missing: {missing}")
+        for added in sorted(set(actual_records) - set(expected_files)):
+            issues.append(f"artifact contains unsealed file: {added}")
+        for name in sorted(set(expected_files) & set(actual_records)):
+            if expected_files[name].get("bytes") != actual_records[name]["bytes"]:
+                issues.append(f"artifact byte-size mismatch: {name}")
+            if expected_files[name].get("sha256") != actual_records[name]["sha256"]:
+                issues.append(f"artifact sha256 mismatch: {name}")
+        digest = self._records_digest(tuple(actual_records.values()))
+        if manifest.get("revisionDigest") != digest:
+            issues.append("artifact revision digest mismatch")
+        if issues:
+            raise ArtifactIntegrityError(tuple(issues))
+        return ArtifactSnapshot(
+            kind=kind,
+            revision=revision,
+            digest=digest,
+            files=files,
+        )
+
+    def copy_verified_file(
+        self,
+        product: Product,
+        kind: ArtifactKind,
+        revision: str,
+        relative_path: str,
+        destination: Path,
+    ) -> VerifiedFileCopy:
+        """Copy one approved file to a private path while hashing the copied bytes."""
+
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("artifact copy path must stay inside its revision")
+        product_root = product.root.resolve()
+        destination = destination.resolve()
+        if not destination.is_relative_to(product_root):
+            raise ValueError("verified file copies must stay inside the Product directory")
+        root = product.root / self._ARTIFACT_PATHS[kind] / revision
+        manifest_path = root / self._MANIFEST_NAME
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ArtifactIntegrityError(
+                (f"artifact integrity manifest is invalid: {kind.value}:{revision}",)
+            ) from error
+        records = tuple(
+            item
+            for item in manifest.get("files", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and isinstance(item.get("bytes"), int)
+            and isinstance(item.get("sha256"), str)
+        )
+        manifest_digest = self._records_digest(records)
+        expected = next((item for item in records if item["path"] == relative.as_posix()), None)
+        issues = []
+        if manifest.get("kind") != kind.value:
+            issues.append(f"artifact kind mismatch: expected {kind.value}")
+        if manifest.get("revision") != revision:
+            issues.append(f"artifact revision mismatch: expected {revision}")
+        if manifest.get("revisionDigest") != manifest_digest:
+            issues.append("artifact revision digest mismatch")
+        if expected is None:
+            issues.append(f"artifact file is missing from manifest: {relative.as_posix()}")
+        if issues:
+            raise ArtifactIntegrityError(tuple(issues))
+        source = root / relative
+        if source.is_symlink():
+            raise ArtifactIntegrityError((f"artifact symlink is not allowed: {relative_path}",))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        copied_bytes = 0
+        try:
+            with source.open("rb") as source_handle, destination.open("xb") as target_handle:
+                while chunk := source_handle.read(1024 * 1024):
+                    target_handle.write(chunk)
+                    digest.update(chunk)
+                    copied_bytes += len(chunk)
+        except OSError as error:
+            destination.unlink(missing_ok=True)
+            raise ArtifactIntegrityError(
+                (f"artifact file snapshot failed: {relative.as_posix()}",)
+            ) from error
+        file_sha256 = digest.hexdigest()
+        if copied_bytes != expected["bytes"] or file_sha256 != expected["sha256"]:
+            destination.unlink(missing_ok=True)
+            raise ArtifactIntegrityError(
+                (f"artifact changed while copying: {relative.as_posix()}",)
+            )
+        return VerifiedFileCopy(
+            path=destination,
+            revision_digest=manifest_digest,
+            file_sha256=file_sha256,
         )
 
     def seal_legacy_revision(

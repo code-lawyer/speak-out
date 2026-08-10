@@ -183,11 +183,14 @@ class ChromePageController:
     .replace(/\\s+/g, ' ')
     .trim();
   const chipSelectors = {json.dumps(list(chip_selectors), ensure_ascii=False)};
-  const chips = chipSelectors.flatMap(selector => [...scope.querySelectorAll(selector)])
-    .map(node => normalize(node.getAttribute('data-tag') || node.textContent || ''));
-  return {json.dumps(list(tags), ensure_ascii=False)}
-    .map(normalize)
-    .every(tag => chips.includes(tag));
+  const chips = [...new Set(chipSelectors.flatMap(
+    selector => [...scope.querySelectorAll(selector)]
+  ).map(node => normalize(node.getAttribute('data-tag') || node.textContent || ''))
+    .filter(Boolean))].sort();
+  const approved = [...new Set({json.dumps(list(tags), ensure_ascii=False)}
+    .map(normalize).filter(Boolean))].sort();
+  return approved.length === chips.length
+    && approved.every((tag, index) => tag === chips[index]);
 }})()
 """.strip()
         deadline = time.monotonic() + 5

@@ -50,7 +50,7 @@ Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction
 
 ### PlatformPublisher
 
-Validate platform metadata, confirm login, upload the approved MP4, submit immediate publication, and return a result. Required metadata must be read back from the anchored platform control before submission; Bilibili tag chips and the selected category are explicit examples. Each platform is an independent Adapter at this real seam.
+Validate platform metadata, confirm login, upload the approved MP4, submit immediate publication, and return a result. The social workflow reads copy from a manifest-verified byte snapshot and streams the approved MP4 into a private, unpredictable Product-local snapshot whose hash is checked against the sealed revision; that snapshot is retained through browser upload and then removed. Required metadata must be read back from the anchored platform control before submission; Bilibili requires the normalized tag-chip set to exactly equal the approval and the selected category value to match exactly. Each platform is an independent Adapter at this real seam.
 
 ## Upstream absorption
 

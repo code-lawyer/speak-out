@@ -262,6 +262,7 @@ chrome_path = "C:/fake/chrome.exe"
     assert payload["state"] == "submitted"
     assert (product.root / payload["logFile"]).is_file()
     assert len(driver_calls) == 1
+    assert not list((product.root / "publish" / ".staging").glob("*.mp4"))
     status = CliRunner().invoke(
         app,
         ["product", "status", "--product", str(product.root), "--json"],

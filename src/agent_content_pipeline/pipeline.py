@@ -121,22 +121,25 @@ class ArticlePublicationWorkflow:
         target_slug: str | None = None,
         push_to_wechat: bool = True,
     ) -> ArticlePublishResult:
-        article = self._workspace.verify_revision(
+        article = self._workspace.read_verified_revision(
             self._product,
             ArtifactKind.ARTICLE,
             article_revision,
         )
-        cover = self._workspace.verify_revision(
+        cover = self._workspace.read_verified_revision(
             self._product,
             ArtifactKind.COVER,
             cover_revision,
         )
-        if article.digest is None or cover.digest is None:
-            raise RuntimeError("verified publication artifacts must have content digests")
-        markdown = (article.root / "article.mdx").read_text(encoding="utf-8")
-        body_html = (article.root / "body.html").read_text(encoding="utf-8")
-        wechat_html = (article.root / "index.html").read_text(encoding="utf-8")
-        cover_png = (cover.root / "cover.png").read_bytes()
+        try:
+            markdown = article.files["article.mdx"].decode("utf-8")
+            body_html = article.files["body.html"].decode("utf-8")
+            wechat_html = article.files["index.html"].decode("utf-8")
+            cover_png = cover.files["cover.png"]
+        except (KeyError, UnicodeError) as error:
+            raise ArticleValidationError(
+                ("verified article bundle is incomplete or not UTF-8",)
+            ) from error
         validation_issues = validate_article_bundle(
             markdown,
             body_html,

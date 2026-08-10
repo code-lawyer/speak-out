@@ -148,3 +148,36 @@ def test_revision_manifest_detects_any_change_after_artifact_creation(tmp_path):
     (revision.root / "article.mdx").write_bytes(b"changed after approval")
     with pytest.raises(ArtifactIntegrityError, match="sha256 mismatch"):
         workspace.verify_revision(product, ArtifactKind.ARTICLE, "v001")
+
+
+def test_verified_file_copy_is_bound_to_manifest_and_independent_of_later_source_changes(
+    tmp_path,
+):
+    workspace = ProductWorkspace(tmp_path / "workspace")
+    product = workspace.create(
+        ProductCreateRequest(
+            title="视频快照",
+            slug="video-snapshot",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    staging = product.root / "video" / "work" / "render"
+    (staging / "output").mkdir(parents=True)
+    (staging / "output" / "final.mp4").write_bytes(b"approved-video")
+    revision = workspace.commit_revision_directory(
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        staging,
+    )
+    private_copy = workspace.copy_verified_file(
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        "v001",
+        "output/final.mp4",
+        product.root / "publish" / ".staging" / "private.mp4",
+    )
+
+    (revision.root / "output" / "final.mp4").write_bytes(b"changed-later")
+
+    assert private_copy.revision_digest == revision.digest
+    assert private_copy.path.read_bytes() == b"approved-video"

@@ -61,7 +61,7 @@ Pass `--allow-edge-tts-data-transfer` only after the user explicitly accepts tha
 - Open visible local Chrome windows when login, captcha, QR scanning, or platform confirmation is needed.
 - Tell the user which platform will open and that its dedicated local Chrome Profile retains login state.
 - Treat every platform as an independent publication. Continue other selected platforms after one fails unless the failure invalidates the shared video.
-- For Bilibili, require the selected category and every approved tag chip to be read back from their anchored controls before allowing Publish; a click or synthetic Enter event alone is not confirmation.
+- For Bilibili, require the selected category and normalized tag-chip set to exactly equal the approved metadata when read back from their anchored controls before allowing Publish; a click, synthetic Enter event, subset, or extra chip is not confirmation.
 - Use `acp retry --product ... --stage ...` without `--execute` to show the exact stored replay command. Retry only the named `failed` or `waiting_for_user` stage, and add `--execute` only after confirmation.
 - Treat timeouts after submission as unknown. Query status before retrying.
 - Never replay website or WeChat publication during a social-platform retry.

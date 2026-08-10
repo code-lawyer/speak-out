@@ -24,7 +24,7 @@ Edge TTS is an online service: the narration text leaves the machine. Pexels sea
 
 The CLI requires `--allow-edge-tts-data-transfer` before constructing the online narrator and `--allow-pexels-data-transfer` before remote material search. These flags are exact-command acknowledgements, not permanent consent. Supplying both local `--narration-audio` and `--subtitles` bypasses Edge TTS; supplying `--material-revision` bypasses Pexels.
 
-Article publication sends the approved MDX, WeChat HTML, and cover to the configured VPS. Social publication exposes only the approved MP4 and platform copy to the selected creator page in visible Chrome.
+Article publication sends one manifest-verified snapshot of the approved MDX, WeChat HTML, and cover to the configured VPS. Social publication reads copy from a verified snapshot and exposes a private, manifest-bound MP4 copy only to the selected creator page in visible Chrome; the temporary copy stays inside the Product and is removed after the attempt.
 
 Every artifact revision is sealed with a local SHA-256 manifest. Artifact and publication approvals retain the associated content digest. A missing or changed file blocks later approval or execution. Legacy revisions require an explicit seal operation and must then be approved normally. A valid legacy hash is not treated as content validity: the exact MDX, WeChat body/full HTML, and PNG bytes are revalidated before preview, publication approval, preflight, and execution.
 
