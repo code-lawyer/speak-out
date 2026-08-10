@@ -239,3 +239,27 @@ def test_chrome_driver_closes_only_the_requested_dedicated_session(tmp_path):
     driver.close(target)
 
     assert calls == ["Browser.close", "transport.close"]
+
+
+def test_chrome_driver_stops_only_a_session_launched_by_this_driver(tmp_path):
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"exe")
+    launched = FakeProcess()
+    driver = LocalChromeCdpDriver(project_root=tmp_path, chrome_path=chrome)
+    driver._processes["bilibili"] = launched
+
+    from agent_content_pipeline.browser.chrome import ChromeSession
+
+    owned = ChromeSession(
+        platform="bilibili",
+        profile_root=tmp_path / ".local" / "browser-profiles" / "bilibili",
+        port=53123,
+        websocket_url="ws://owned",
+        process_id=launched.pid,
+    )
+    existing = owned.model_copy(update={"process_id": None})
+
+    driver.stop_launched_session(existing)
+    assert launched.terminated is False
+    driver.stop_launched_session(owned)
+    assert launched.terminated is True

@@ -177,15 +177,21 @@ class ChromePageController:
   if (!(element instanceof HTMLInputElement)) return false;
   const scope = element.closest('[class*="tag" i]');
   if (!scope) return false;
-  const normalize = value => value
-    .replace(/[×✕]/g, '')
-    .replace(/删除/g, '')
-    .replace(/\\s+/g, ' ')
-    .trim();
+  const normalize = value => value.replace(/\\s+/g, ' ').trim();
+  const chipValue = node => {{
+    const explicit = node.getAttribute('data-tag');
+    if (explicit) return normalize(explicit);
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll(
+      'button, [role="button"], [aria-label*="删除"], [aria-label*="移除"], '
+      + '[class*="close" i], [class*="delete" i], svg'
+    ).forEach(control => control.remove());
+    return normalize(clone.textContent || '');
+  }};
   const chipSelectors = {json.dumps(list(chip_selectors), ensure_ascii=False)};
   const chips = [...new Set(chipSelectors.flatMap(
     selector => [...scope.querySelectorAll(selector)]
-  ).map(node => normalize(node.getAttribute('data-tag') || node.textContent || ''))
+  ).map(chipValue)
     .filter(Boolean))].sort();
   const approved = [...new Set({json.dumps(list(tags), ensure_ascii=False)}
     .map(normalize).filter(Boolean))].sort();

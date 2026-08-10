@@ -285,6 +285,16 @@ class LocalChromeCdpDriver:
             if callable(close):
                 close()
 
+    def stop_launched_session(self, session: ChromeSession) -> None:
+        """Stop only a process launched and still owned by this driver instance."""
+
+        if session.process_id is None:
+            return
+        process = self._processes.get(session.platform)
+        if process is None or process.pid != session.process_id:
+            return
+        self._stop_launched_process(session.platform, process)
+
     def _stop_launched_process(self, platform: str, process: RunningProcess) -> None:
         self._processes.pop(platform, None)
         if process.poll() is not None:

@@ -7,7 +7,7 @@ This file distinguishes implemented behavior from production evidence. Version 1
 | Requirement | Evidence | Status |
 | --- | --- | --- |
 | Windows runtime dependencies | `acp doctor --json` confirmed Python 3.12, FFmpeg, FFprobe, unified config, and installed Chrome on 2026-08-10 | verified |
-| Offline test suite | 95 tests passed on 2026-08-10, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, single-read article snapshots, manifest-bound private video snapshots and cleanup, legacy validation, Chrome reconnect/interrupt cleanup, constrained publication states, and exact anchored social metadata readback; rerun after every release-gate change | verified |
+| Offline test suite | 96 tests passed on 2026-08-10, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, single-read article snapshots, manifest-bound private video snapshots and cleanup on every exit, legacy validation, Chrome reconnect/interrupt/owned-process cleanup, constrained publication states, and exact anchored social metadata readback; rerun after every release-gate change | verified |
 | Package build | Source distribution and wheel built with `uv build` | verified |
 | Project-local Agent Skill | Official Skill validator passed for `.agents/skills/content-pipeline` | verified |
 | Landscape video | A fully local Product rendered and re-inspected a 1920×1080 H.264 MP4 with audio, duration 3.5 seconds | verified |

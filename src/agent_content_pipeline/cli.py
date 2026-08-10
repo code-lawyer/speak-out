@@ -1865,138 +1865,149 @@ def publish_social_video(
         )
     except ArtifactIntegrityError as error:
         raise typer.BadParameter(str(error), param_hint="--video-revision") from error
-    exact_publication_digest = social_publication_content_digest(
-        video_copy.revision_digest,
-        copy_artifact.digest,
-        platform,
-    )
-    exact_video_approved = approvals.has(
-        ApprovalScope.VIDEO,
-        video_revision,
-        video_copy.revision_digest,
-    )
-    exact_publication_approved = approvals.has(
-        ApprovalScope.SOCIAL_PUBLICATION,
-        key,
-        exact_publication_digest,
-    )
-    if not exact_video_approved or not exact_publication_approved:
-        video_copy.path.unlink(missing_ok=True)
-        raise typer.BadParameter("exact social publication approval changed before upload")
-    spec = spec.model_copy(update={"video_path": video_copy.path})
     try:
-        session = driver.launch(platform=platform.value, start_url=contract.upload_url)
-        cdp = CdpWebSocketClient(session.websocket_url)
-    except BaseException:
-        video_copy.path.unlink(missing_ok=True)
-        raise
-    timestamp = datetime.now(UTC)
-    screenshot_path: Path | None = None
-    page = None
-    result = SocialPublishResult(
-        platform=platform,
-        state=SocialPublicationState.UNKNOWN,
-        message="browser automation did not complete; reconcile before retrying",
-    )
-    try:
-        attempt = publications.begin_attempt(destination, key)
-        if not attempt.claim.acquired:
-            raise typer.BadParameter(
-                f"publication is already claimed with state {attempt.claim.prior_state}: "
-                f"{destination}:{key}"
-            )
-        with attempt:
-            try:
-                page = ChromePageController.attach(cdp)
-            except Exception as error:
-                result = SocialPublishResult(
-                    platform=platform,
-                    state=SocialPublicationState.FAILED,
-                    message=(
-                        "the local creator page could not be attached before publication; "
-                        f"this attempt is safe to retry ({type(error).__name__})"
-                    ),
-                )
-            else:
-                attempt.mark_external_started()
+        exact_publication_digest = social_publication_content_digest(
+            video_copy.revision_digest,
+            copy_artifact.digest,
+            platform,
+        )
+        exact_video_approved = approvals.has(
+            ApprovalScope.VIDEO,
+            video_revision,
+            video_copy.revision_digest,
+        )
+        exact_publication_approved = approvals.has(
+            ApprovalScope.SOCIAL_PUBLICATION,
+            key,
+            exact_publication_digest,
+        )
+        if not exact_video_approved or not exact_publication_approved:
+            raise typer.BadParameter("exact social publication approval changed before upload")
+        spec = spec.model_copy(update={"video_path": video_copy.path})
+        session = None
+        try:
+            session = driver.launch(platform=platform.value, start_url=contract.upload_url)
+            cdp = CdpWebSocketClient(session.websocket_url)
+        except BaseException:
+            if session is not None and session.process_id is not None:
                 try:
-                    result = VisibleChromePlatformPublisher(platform).publish(page, spec)
+                    driver.stop_launched_session(session)
+                except BaseException:
+                    pass
+            raise
+        timestamp = datetime.now(UTC)
+        screenshot_path: Path | None = None
+        page = None
+        result = SocialPublishResult(
+            platform=platform,
+            state=SocialPublicationState.UNKNOWN,
+            message="browser automation did not complete; reconcile before retrying",
+        )
+        try:
+            attempt = publications.begin_attempt(destination, key)
+            if not attempt.claim.acquired:
+                raise typer.BadParameter(
+                    f"publication is already claimed with state {attempt.claim.prior_state}: "
+                    f"{destination}:{key}"
+                )
+            with attempt:
+                try:
+                    page = ChromePageController.attach(cdp)
                 except Exception as error:
                     result = SocialPublishResult(
                         platform=platform,
-                        state=SocialPublicationState.UNKNOWN,
+                        state=SocialPublicationState.FAILED,
                         message=(
-                            "browser automation was interrupted after opening the creator flow; "
-                            f"reconcile before retrying ({type(error).__name__})"
+                            "the local creator page could not be attached before publication; "
+                            f"this attempt is safe to retry ({type(error).__name__})"
                         ),
                     )
-            attempt.finish(PublicationRecordState(result.state.value))
-    finally:
-        if page is not None and result.state != SocialPublicationState.SUBMITTED:
-            candidate = product.root / "logs" / (
-                timestamp.isoformat().replace(":", "-").replace(".", "-")
-                + f"-{platform.value}.png"
-            )
+                else:
+                    attempt.mark_external_started()
+                    try:
+                        result = VisibleChromePlatformPublisher(platform).publish(page, spec)
+                    except Exception as error:
+                        result = SocialPublishResult(
+                            platform=platform,
+                            state=SocialPublicationState.UNKNOWN,
+                            message=(
+                                "browser automation was interrupted after opening the creator flow; "
+                                f"reconcile before retrying ({type(error).__name__})"
+                            ),
+                        )
+                attempt.finish(PublicationRecordState(result.state.value))
+        finally:
+            if page is not None and result.state != SocialPublicationState.SUBMITTED:
+                candidate = product.root / "logs" / (
+                    timestamp.isoformat().replace(":", "-").replace(".", "-")
+                    + f"-{platform.value}.png"
+                )
+                try:
+                    screenshot_path = page.screenshot(candidate)
+                except BaseException:
+                    screenshot_path = None
             try:
-                screenshot_path = page.screenshot(candidate)
-            except Exception:
-                screenshot_path = None
-        try:
-            cdp.close()
-        except Exception:
-            pass
-        video_copy.path.unlink(missing_ok=True)
+                cdp.close()
+            except BaseException:
+                pass
 
-    log_root = product.root / "logs"
-    log_root.mkdir(exist_ok=True)
-    log_path = log_root / (
-        timestamp.isoformat().replace(":", "-").replace(".", "-")
-        + f"-{platform.value}.json"
-    )
-    log_path.write_text(
-        json.dumps(
-            {
-                "timestamp": timestamp.isoformat(),
-                "destination": destination,
-                "idempotencyKey": key,
-                "videoRevision": video_revision,
-                "copyRevision": copy_revision,
-                "platform": platform.value,
-                "state": result.state.value,
-                "message": result.message,
-                "permalink": result.permalink,
-                "screenshotFile": (
-                    str(screenshot_path.relative_to(product.root))
-                    if screenshot_path is not None
-                    else None
-                ),
-            },
-            ensure_ascii=False,
-            indent=2,
+        log_root = product.root / "logs"
+        log_root.mkdir(exist_ok=True)
+        log_path = log_root / (
+            timestamp.isoformat().replace(":", "-").replace(".", "-")
+            + f"-{platform.value}.json"
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    payload = {
-        "ok": result.state == SocialPublicationState.SUBMITTED,
-        "platform": platform.value,
-        "state": result.state.value,
-        "message": result.message,
-        "permalink": result.permalink,
-        "logFile": str(log_path.relative_to(product.root)),
-        "screenshotFile": (
-            str(screenshot_path.relative_to(product.root))
-            if screenshot_path is not None
-            else None
-        ),
-    }
-    if json_output:
-        typer.echo(json.dumps(payload, ensure_ascii=False))
-    else:
-        typer.echo(f"{platform.value}: {result.state.value} — {result.message}")
-        typer.echo(f"Log: {log_path}")
-    if result.state != SocialPublicationState.SUBMITTED:
-        raise typer.Exit(code=3 if result.state == SocialPublicationState.WAITING_FOR_USER else 1)
+        log_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": timestamp.isoformat(),
+                    "destination": destination,
+                    "idempotencyKey": key,
+                    "videoRevision": video_revision,
+                    "copyRevision": copy_revision,
+                    "platform": platform.value,
+                    "state": result.state.value,
+                    "message": result.message,
+                    "permalink": result.permalink,
+                    "screenshotFile": (
+                        str(screenshot_path.relative_to(product.root))
+                        if screenshot_path is not None
+                        else None
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = {
+            "ok": result.state == SocialPublicationState.SUBMITTED,
+            "platform": platform.value,
+            "state": result.state.value,
+            "message": result.message,
+            "permalink": result.permalink,
+            "logFile": str(log_path.relative_to(product.root)),
+            "screenshotFile": (
+                str(screenshot_path.relative_to(product.root))
+                if screenshot_path is not None
+                else None
+            ),
+        }
+        if json_output:
+            typer.echo(json.dumps(payload, ensure_ascii=False))
+        else:
+            typer.echo(f"{platform.value}: {result.state.value} — {result.message}")
+            typer.echo(f"Log: {log_path}")
+        if result.state != SocialPublicationState.SUBMITTED:
+            raise typer.Exit(
+                code=3 if result.state == SocialPublicationState.WAITING_FOR_USER else 1
+            )
+    finally:
+        try:
+            video_copy.path.unlink(missing_ok=True)
+        except BaseException:
+            pass
 
 
 @product_app.command("create")

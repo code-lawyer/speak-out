@@ -124,11 +124,24 @@ chrome_path = "C:/fake/chrome.exe"
             SocialPlatform.DOUYIN,
         ),
     )
+    approvals.record(
+        ApprovalScope.SOCIAL_PUBLICATION,
+        social_publication_approval_key("v001", "v001", SocialPlatform.XIAOHONGSHU),
+        social_publication_content_digest(
+            video_revision.digest,
+            copy_revision.digest,
+            SocialPlatform.XIAOHONGSHU,
+        ),
+    )
 
     class FakeSession:
-        websocket_url = "ws://fake"
+        def __init__(self, platform):
+            self.platform = platform
+            self.websocket_url = f"ws://fake/{platform}"
+            self.process_id = 123
 
     driver_calls = []
+    stopped_sessions = []
 
     class FakeDriver:
         def __init__(self, *, project_root, chrome_path):
@@ -137,13 +150,18 @@ chrome_path = "C:/fake/chrome.exe"
 
         def launch(self, *, platform, start_url):
             driver_calls.append((platform, start_url))
-            assert platform in {"bilibili", "douyin"}
+            assert platform in {"bilibili", "douyin", "xiaohongshu"}
             assert start_url.startswith("https://")
-            return FakeSession()
+            return FakeSession(platform)
+
+        def stop_launched_session(self, session):
+            stopped_sessions.append(session.platform)
 
     class FakeCdp:
         def __init__(self, url):
-            assert url == "ws://fake"
+            assert url.startswith("ws://fake/")
+            if url.endswith("/xiaohongshu"):
+                raise CdpError("CDP connection failed")
 
         def close(self):
             pass
@@ -236,6 +254,40 @@ chrome_path = "C:/fake/chrome.exe"
         "failed",
     )
 
+    original_has = ApprovalLedger.has
+    approval_checks = 0
+
+    def interrupt_after_private_copy(self, scope, revision, content_digest=None):
+        nonlocal approval_checks
+        approval_checks += 1
+        if approval_checks == 3:
+            raise KeyboardInterrupt()
+        return original_has(self, scope, revision, content_digest)
+
+    monkeypatch.setattr(ApprovalLedger, "has", interrupt_after_private_copy)
+    interrupted = CliRunner().invoke(
+        app,
+        [
+            "social",
+            "publish",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--platform",
+            "bilibili",
+            "--video-revision",
+            "v001",
+            "--copy-revision",
+            "v001",
+            "--execute",
+            "--json",
+        ],
+    )
+    assert interrupted.exit_code == 130
+    assert not list((product.root / "publish" / ".staging").glob("*.mp4"))
+    monkeypatch.setattr(ApprovalLedger, "has", original_has)
+
     result = CliRunner().invoke(
         app,
         [
@@ -270,6 +322,29 @@ chrome_path = "C:/fake/chrome.exe"
     publications = json.loads(status.stdout)["publications"]
     assert publications[0]["destination"] == "social:bilibili"
     assert publications[0]["state"] == "submitted"
+
+    cdp_failed = CliRunner().invoke(
+        app,
+        [
+            "social",
+            "publish",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--platform",
+            "xiaohongshu",
+            "--video-revision",
+            "v001",
+            "--copy-revision",
+            "v001",
+            "--execute",
+            "--json",
+        ],
+    )
+    assert cdp_failed.exit_code != 0
+    assert stopped_sessions == ["xiaohongshu"]
+    assert not list((product.root / "publish" / ".staging").glob("*.mp4"))
 
     uncertain = CliRunner().invoke(
         app,
