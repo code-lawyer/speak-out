@@ -11,6 +11,19 @@ The product is controlled through a deterministic Python CLI. A project-local Sk
 
 The discoverable project Skill is installed at `.agents/skills/speak-out/`; it is part of this repository and is not a global installation. The primary CLI command is `speak-out`; the former `acp` command remains available as a backward-compatible alias.
 
+## Project documentation
+
+- [Current status and remaining release work](docs/PROJECT_STATUS.md)
+- [Product specification](docs/PRODUCT.md)
+- [Architecture and failure model](docs/ARCHITECTURE.md)
+- [Development plan and phase progress](docs/DEVELOPMENT_PLAN.md)
+- [Security model](docs/SECURITY.md)
+- [Release evidence](docs/RELEASE_EVIDENCE.md)
+- [Clean clone and local-state checklist](docs/CLEAN_CLONE_CHECKLIST.md)
+
+Agents should start with [AGENTS.md](AGENTS.md), which reconstructs the durable
+project context and points to the authoritative documents in reading order.
+
 ## Status
 
 The local CLI, article compatibility path, video engine, Chrome/CDP driver, and first three social adapters are implemented. The offline suite is green; version 1.0 remains unreleased until separately approved live publications prove Xiaohongshu, Douyin, and Bilibili against their current creator pages.

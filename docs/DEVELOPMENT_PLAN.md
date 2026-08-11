@@ -1,5 +1,19 @@
 # Development plan
 
+## Progress snapshot
+
+| Phase | Status | Remaining proof |
+| --- | --- | --- |
+| Phase 0 — repository and contracts | implemented | clean public-clone setup rerun |
+| Phase 1 — article compatibility | implemented and live-proven | repeat in final clean-clone run |
+| Phase 2 — video engine | implemented and live-proven | repeat in final clean-clone run |
+| Phase 3 — browser foundation | implemented and offline-proven | exercise all three live Profiles |
+| Phase 4 — platform publishers | implemented and offline-proven | one confirmed live post per platform |
+| Phase 5 — orchestration and Agent Skill | implemented and offline-proven | real retry/reconciliation plus complete v1 gate |
+
+See `PROJECT_STATUS.md` for the current baseline and `RELEASE_EVIDENCE.md` for
+the distinction between implemented behavior and destination-confirmed proof.
+
 ## Phase 0 — repository and contracts
 
 - Establish packaging, license, third-party notices, security policy, Product layout, domain vocabulary, and test seams.

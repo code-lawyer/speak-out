@@ -7,10 +7,11 @@ This file distinguishes implemented behavior from production evidence. Version 1
 | Requirement | Evidence | Status |
 | --- | --- | --- |
 | Windows runtime dependencies | `speak-out doctor --json` confirmed Python 3.12, FFmpeg, FFprobe, unified config, and installed Chrome on 2026-08-10 | verified |
-| Offline test suite | 97 tests passed on 2026-08-10, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, single-read article snapshots, manifest-bound private video snapshots, retryable Windows cleanup with pending markers, legacy validation, Chrome reconnect/interrupt/owned-process cleanup, constrained publication states, and exact anchored social metadata readback; rerun after every release-gate change | verified |
+| Offline test suite | 122 tests passed on 2026-08-11, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, exact article/video snapshots, provenance-checked media-cache import, retryable Windows cleanup, legacy validation, Chrome cleanup, and exact anchored metadata readback for all three social platforms | verified |
 | Package build | Source distribution and wheel built with `uv build` | verified |
 | Project-local Agent Skill | Official Skill validator passed for `.agents/skills/speak-out` | verified |
-| Landscape video | A fully local Product rendered and re-inspected a 1920×1080 H.264 MP4 with audio, duration 3.5 seconds | verified |
+| Landscape video | Product `ai-is-coming-for-lawyers` produced two inspected 1920×1080 H.264 MP4 revisions with audio and 495.1-second duration | verified |
+| Edge TTS and Pexels path | The approved script produced `v002` with Edge TTS and 24 remotely acquired Pexels clips after both exact transfer acknowledgements | verified live |
 | Artifact integrity | Source, script, material, and render revisions reported valid SHA-256 manifests in the local smoke Product | verified |
 | Independent run/retry state | Unit and CLI tests cover run IDs, independent branch continuation, exact retry, reconciliation, and legacy SQLite migration | verified offline |
 | Preflight safety | Real candidate-Product dry-run reported missing article/cover/publication/script approvals and separate Edge TTS/Pexels transfer gates; execute mode unit tests prove blocked child processes are not started | verified offline |
@@ -22,14 +23,19 @@ The ignored local smoke Product is `workspace/2026-08-10-local-render-smoke`. It
 
 | Destination or gate | Required proof | Current status |
 | --- | --- | --- |
-| Personal website | New-project `speak-out` execution receives explicit VPS business success and the article is visible | pending user-approved live run |
-| WeChat Official Account | The same VPS execution reports `wechatPushed: true` and the expected draft is visible | pending user-approved live run |
-| Edge TTS default path | Exact approved narration is sent only after `--allow-edge-tts-data-transfer`, then produces valid audio and SRT | pending data-transfer authorization |
+| Clean public clone | Clone `code-lawyer/speak-out` into a new directory and complete setup, doctor, tests, Skill validation, and a new Product | pending final acceptance run |
 | Xiaohongshu | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending login and publication approval |
 | Douyin | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending login and publication approval |
 | Bilibili | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending login and publication approval |
 | Live reconciliation | At least one safe `waiting_for_user` retry or a destination-checked reconciliation is demonstrated without replaying another destination | pending live opportunity |
 | Production log audit | Logs, screenshots, Git state, and terminal output contain no secret, cookie, token, or private credential | pending after live run |
+
+## Destination-confirmed production evidence
+
+| Destination or gate | Evidence | Status |
+| --- | --- | --- |
+| Personal website | Product `ai-is-coming-for-lawyers`, publication key `v001+v001+ai-is-coming-for-lawyers+wechat`; local ledger recorded `succeeded` and the user confirmed the article was visible | verified 2026-08-10 |
+| WeChat Official Account | The same fixed-IP VPS attempt completed and the user confirmed the expected draft appeared in the Official Account draft box | verified 2026-08-10 |
 
 ## Rules for completing the gate
 
