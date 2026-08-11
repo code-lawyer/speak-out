@@ -1,7 +1,9 @@
 # Project status
 
-Last updated: 2026-08-11  
-Repository: `https://github.com/code-lawyer/speak-out`  
+Last updated: 2026-08-11
+
+Repository: `https://github.com/code-lawyer/speak-out`
+
 Current baseline commit when this status was prepared: `b3eb103`
 
 ## Executive status
