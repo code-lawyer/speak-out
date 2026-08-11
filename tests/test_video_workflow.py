@@ -216,3 +216,108 @@ def test_video_workflow_snapshots_local_narration_before_rendering(tmp_path):
     )
 
     assert result.final_path.read_bytes() == b"video"
+
+
+def test_remote_material_count_can_supply_a_long_video_with_many_distinct_clips(tmp_path):
+    workspace = ProductWorkspace(tmp_path / "workspace")
+    product = workspace.create(
+        ProductCreateRequest(
+            title="远程素材多样性",
+            slug="remote-material-diversity",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    script = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.VIDEO_SCRIPT,
+            files={
+                "script.json": json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "narration": "这是一段较长的获批旁白。" * 100,
+                        "materialTerms": ["law", "technology", "future"],
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            },
+        ),
+    )
+
+    class Approved:
+        def has(self, scope, revision, content_digest=None):
+            return content_digest == script.digest
+
+    class FakeNarrator:
+        def synthesize(self, *, narration, voice, output_root, rate="+0%"):
+            output_root.mkdir(parents=True)
+            audio = output_root / "narration.mp3"
+            subtitles = output_root / "subtitles.srt"
+            audio.write_bytes(b"audio")
+            subtitles.write_text("subtitle", encoding="utf-8")
+            return NarrationResult(
+                root=output_root,
+                audio_path=audio,
+                subtitles_path=subtitles,
+                voice=voice,
+            )
+
+    class DiverseSource:
+        def acquire(self, *, terms, destination, max_files, minimum_duration=5):
+            from agent_content_pipeline.video.materials import DownloadedMaterial
+
+            destination.mkdir(parents=True)
+            results = []
+            for index in range(max_files):
+                path = destination / f"{index:03d}.mp4"
+                path.write_bytes(b"video")
+                results.append(
+                    DownloadedMaterial(
+                        path=path,
+                        asset_id=str(index),
+                        width=1920,
+                        height=1080,
+                        duration_seconds=10,
+                        source_url=f"https://example.test/{index}",
+                        search_term=terms[index % len(terms)],
+                    )
+                )
+            return results
+
+    class DiversityCheckingRenderer:
+        def render_from_assets(
+            self, *, materials, narration_audio, subtitles, output_root, bgm=None
+        ):
+            assert len(materials) == 24
+            assert len(set(materials)) == 24
+            output_root.mkdir(parents=True)
+            video = output_root / "final.mp4"
+            video.write_bytes(b"video")
+            return VideoRenderResult(
+                root=output_root,
+                video_path=video,
+                width=1920,
+                height=1080,
+                video_codec="h264",
+                has_audio=True,
+                duration_seconds=10,
+            )
+
+    result = VideoRenderWorkflow(
+        workspace=workspace,
+        product=product,
+        settings=_settings(),
+        approval_ledger=Approved(),
+        narrator=FakeNarrator(),
+        material_source=DiverseSource(),
+        renderer=DiversityCheckingRenderer(),
+    ).render(
+        VideoRenderRequest(
+            script_revision="v001",
+            material_count=24,
+            allow_edge_tts_data_transfer=True,
+            allow_pexels_data_transfer=True,
+        )
+    )
+
+    assert result.final_path.read_bytes() == b"video"

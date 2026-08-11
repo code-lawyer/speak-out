@@ -79,6 +79,11 @@ uv run acp video inspect --product <product> --revision v001
 uv run acp approval record --product <product> --scope video --revision v001 --confirmed-by-user
 ```
 
+For remote stock footage, omit `--material-revision`, acknowledge Pexels data
+transfer, and optionally set `--material-count` from 1 to 36. By default the
+count scales with script length up to 24 clips. Downloads are distributed across
+all approved search terms, and repeated clips use different source time windows.
+
 Approve and submit each social platform independently:
 
 ```powershell

@@ -58,3 +58,47 @@ def test_pexels_source_downloads_landscape_renditions_and_keeps_attribution(tmp_
     metadata = json.loads((tmp_path / "materials" / "materials.json").read_text("utf-8"))
     assert metadata[0]["creator"] == "Example Creator"
     assert "pexels-secret" not in json.dumps(metadata)
+
+
+def test_pexels_source_round_robins_across_search_terms(tmp_path):
+    def video(asset_id: int) -> dict:
+        return {
+            "id": asset_id,
+            "duration": 12,
+            "url": f"https://www.pexels.com/video/{asset_id}/",
+            "user": {"name": f"Creator {asset_id}"},
+            "video_files": [
+                {
+                    "width": 1920,
+                    "height": 1080,
+                    "link": f"https://cdn.example/{asset_id}.mp4",
+                }
+            ],
+        }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.pexels.com":
+            base = 100 if request.url.params["query"] == "law" else 200
+            return httpx.Response(
+                200,
+                json={"videos": [video(base + index) for index in range(3)]},
+                request=request,
+            )
+        return httpx.Response(200, content=b"video", request=request)
+
+    source = PexelsMaterialSource(
+        api_key="pexels-secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    downloads = source.acquire(
+        terms=["law", "technology"],
+        destination=tmp_path / "materials",
+        max_files=4,
+    )
+
+    assert [item.search_term for item in downloads] == [
+        "law",
+        "technology",
+        "law",
+        "technology",
+    ]

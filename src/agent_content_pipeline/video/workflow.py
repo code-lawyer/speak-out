@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import shutil
 from pathlib import Path
@@ -70,6 +71,7 @@ class VideoRenderRequest(BaseModel):
 
     script_revision: str = Field(pattern=r"^v[0-9]{3,}$")
     material_revision: str | None = Field(default=None, pattern=r"^v[0-9]{3,}$")
+    material_count: int | None = Field(default=None, ge=1, le=36)
     bgm_directory: Path | None = None
     narration_audio: Path | None = None
     subtitles: Path | None = None
@@ -149,6 +151,7 @@ class VideoRenderWorkflow:
                         "scriptRevision": request.script_revision,
                         "scriptDigest": script_snapshot.digest,
                         "materialRevision": request.material_revision,
+                        "materialCount": len(materials),
                         "voice": narration.voice,
                         "narrationSource": (
                             "local" if request.narration_audio is not None else "edge-tts"
@@ -201,6 +204,11 @@ class VideoRenderWorkflow:
                 "Pexels receives the approved material search terms; explicit "
                 "--allow-pexels-data-transfer is required, or provide --material-revision"
             )
+        if request.material_revision is not None and request.material_count is not None:
+            raise VideoWorkflowError(
+                "--material-count applies only to Pexels acquisition; omit it with "
+                "--material-revision"
+            )
 
     def _prepare_materials(
         self,
@@ -236,9 +244,20 @@ class VideoRenderWorkflow:
         downloads = source.acquire(
             terms=spec.material_terms,
             destination=staging / "materials",
-            max_files=min(6, max(1, len(spec.material_terms))),
+            max_files=request.material_count or self._automatic_material_count(spec),
         )
         return [item.path for item in downloads]
+
+    @staticmethod
+    def _automatic_material_count(spec: VideoScriptSpec) -> int:
+        return min(
+            24,
+            max(
+                6,
+                len(spec.material_terms) * 4,
+                math.ceil(len(spec.narration) / 120),
+            ),
+        )
 
     def _prepare_bgm(self, directory: Path | None, staging: Path) -> Path | None:
         if directory is None:

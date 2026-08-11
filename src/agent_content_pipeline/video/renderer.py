@@ -104,18 +104,31 @@ class FfmpegExplainerRenderer:
             shutil.copy2(bgm, local_bgm)
 
         duration = self._duration(local_audio)
+        source_durations = {
+            Path(path).resolve(): self._duration(Path(path).resolve()) for path in materials
+        }
+        source_uses: dict[Path, int] = {}
         clip_count = max(1, math.ceil(duration / self.CLIP_SECONDS))
         clip_paths: list[Path] = []
+        clip_manifest: list[dict[str, str | float]] = []
         for index in range(clip_count):
             source = Path(materials[index % len(materials)]).resolve()
+            use_index = source_uses.get(source, 0)
+            source_uses[source] = use_index + 1
+            source_windows = max(1, math.floor(source_durations[source] / self.CLIP_SECONDS))
+            source_offset = float((use_index % source_windows) * self.CLIP_SECONDS)
             clip_duration = min(self.CLIP_SECONDS, duration - index * self.CLIP_SECONDS)
             clip_path = output_root / f"clip-{index + 1:03d}.mp4"
-            self._runner.run(
+            clip_command = [
+                self.ffmpeg,
+                "-y",
+                "-stream_loop",
+                "-1",
+            ]
+            if source_offset:
+                clip_command.extend(("-ss", f"{source_offset:.3f}"))
+            clip_command.extend(
                 (
-                    self.ffmpeg,
-                    "-y",
-                    "-stream_loop",
-                    "-1",
                     "-i",
                     str(source),
                     "-t",
@@ -136,10 +149,17 @@ class FfmpegExplainerRenderer:
                     "-pix_fmt",
                     "yuv420p",
                     clip_path.name,
-                ),
-                cwd=output_root,
+                )
             )
+            self._runner.run(clip_command, cwd=output_root)
             clip_paths.append(clip_path)
+            clip_manifest.append(
+                {
+                    "source": str(source),
+                    "sourceOffsetSeconds": source_offset,
+                    "durationSeconds": clip_duration,
+                }
+            )
 
         concat_path = output_root / "concat.txt"
         concat_path.write_text(
@@ -211,6 +231,7 @@ class FfmpegExplainerRenderer:
             "hasAudio": result.has_audio,
             "durationSeconds": result.duration_seconds,
             "materials": [str(Path(path).resolve()) for path in materials],
+            "clips": clip_manifest,
             "bgm": local_bgm.name if local_bgm else None,
         }
         (output_root / "render.json").write_text(

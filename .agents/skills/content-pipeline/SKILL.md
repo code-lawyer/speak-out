@@ -54,6 +54,11 @@ Run `acp social preview` separately for every selected platform and show its imm
 
 Before Edge TTS, tell the user that narration text is sent to Microsoft's online speech service. Use `acp artifact add-video-material` plus `acp video render --material-revision ...` for local footage; omit the material revision only when the user has configured and accepts Pexels search/download.
 
+For long Pexels-backed videos, prefer `--material-count 24` (maximum 36) and let
+the acquisition adapter distribute clips across every approved material term.
+Never replace a requested Pexels run with cached local footage without explicit
+user approval.
+
 Pass `--allow-edge-tts-data-transfer` only after the user explicitly accepts that exact narration transfer. Pass `--allow-pexels-data-transfer` only after the user accepts that exact material-term transfer. For private narration, provide both local `--narration-audio` and `--subtitles`; this bypasses Edge TTS. Run `acp video inspect` on the finished revision, show the exact MP4, then record video approval.
 
 ### Publish and recover

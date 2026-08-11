@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,3 +76,60 @@ def test_ffmpeg_renderer_outputs_inspected_1080p_h264_with_narration_and_subtitl
     assert (result.root / "concat.txt").is_file()
     manifest = json.loads((result.root / "render.json").read_text(encoding="utf-8"))
     assert manifest["profile"] == "landscape-explainer-v1"
+
+
+def test_renderer_uses_later_source_windows_when_a_material_repeats(tmp_path):
+    class RecordingRunner:
+        def __init__(self):
+            self.commands = []
+
+        def run(self, command, cwd=None, timeout_seconds=None):
+            command = list(command)
+            self.commands.append(command)
+            if command[0] == "ffprobe" and any(
+                item.startswith("stream=codec_type") for item in command
+            ):
+                stdout = json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "codec_type": "video",
+                                "codec_name": "h264",
+                                "width": 1920,
+                                "height": 1080,
+                            },
+                            {"codec_type": "audio", "codec_name": "aac"},
+                        ],
+                        "format": {"duration": "11"},
+                    }
+                )
+            elif command[0] == "ffprobe":
+                media = Path(command[-1]).name
+                stdout = json.dumps(
+                    {"format": {"duration": "11" if "narration" in media else "10"}}
+                )
+            else:
+                stdout = ""
+            return SimpleNamespace(stdout=stdout)
+
+    source = tmp_path / "source.mp4"
+    audio = tmp_path / "narration.mp3"
+    subtitles = tmp_path / "subtitles.srt"
+    source.write_bytes(b"video")
+    audio.write_bytes(b"audio")
+    subtitles.write_text("subtitle", encoding="utf-8")
+    runner = RecordingRunner()
+
+    result = FfmpegExplainerRenderer(runner=runner).render_from_assets(
+        materials=[source],
+        narration_audio=audio,
+        subtitles=subtitles,
+        output_root=tmp_path / "render-offsets",
+    )
+
+    clip_commands = [command for command in runner.commands if "-stream_loop" in command]
+    assert "-ss" not in clip_commands[0]
+    assert clip_commands[1][clip_commands[1].index("-ss") + 1] == "5.000"
+    assert "-ss" not in clip_commands[2]
+    manifest = json.loads((result.root / "render.json").read_text(encoding="utf-8"))
+    assert [clip["sourceOffsetSeconds"] for clip in manifest["clips"]] == [0.0, 5.0, 0.0]

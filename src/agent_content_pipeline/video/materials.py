@@ -54,7 +54,7 @@ class PexelsMaterialSource:
         destination.mkdir(parents=True, exist_ok=True)
         client = self._http_client or httpx.Client()
         downloads: list[DownloadedMaterial] = []
-        seen_ids: set[str] = set()
+        queues: list[tuple[str, list[dict[str, Any]]]] = []
         for raw_term in terms:
             term = raw_term.strip()
             if not term:
@@ -66,42 +66,55 @@ class PexelsMaterialSource:
                 timeout=self._timeout_seconds,
             )
             response.raise_for_status()
-            for video in response.json().get("videos", []):
-                asset_id = str(video.get("id", ""))
-                duration = float(video.get("duration", 0))
-                if not asset_id or asset_id in seen_ids or duration < minimum_duration:
-                    continue
-                rendition = self._best_landscape_rendition(video.get("video_files", []))
-                if rendition is None:
-                    continue
-                output_path = destination / f"pexels-{asset_id}.mp4"
-                with client.stream(
-                    "GET",
-                    str(rendition["link"]),
-                    timeout=self._timeout_seconds,
-                ) as media_response:
-                    media_response.raise_for_status()
-                    with output_path.open("xb") as output:
-                        for chunk in media_response.iter_bytes():
-                            output.write(chunk)
-                if output_path.stat().st_size <= 0:
-                    output_path.unlink(missing_ok=True)
-                    raise MaterialAcquisitionError(f"Pexels returned an empty file for asset {asset_id}")
-                item = DownloadedMaterial(
-                    path=output_path,
-                    asset_id=asset_id,
-                    width=int(rendition["width"]),
-                    height=int(rendition["height"]),
-                    duration_seconds=duration,
-                    source_url=str(video.get("url", "")),
-                    creator=(video.get("user") or {}).get("name"),
-                    search_term=term,
-                )
-                downloads.append(item)
-                seen_ids.add(asset_id)
+            queues.append((term, list(response.json().get("videos", []))))
+
+        seen_ids: set[str] = set()
+        while len(downloads) < max_files:
+            made_progress = False
+            for term, videos in queues:
+                while videos:
+                    video = videos.pop(0)
+                    asset_id = str(video.get("id", ""))
+                    duration = float(video.get("duration", 0))
+                    if not asset_id or asset_id in seen_ids or duration < minimum_duration:
+                        continue
+                    rendition = self._best_landscape_rendition(video.get("video_files", []))
+                    if rendition is None:
+                        continue
+                    output_path = destination / f"pexels-{asset_id}.mp4"
+                    with client.stream(
+                        "GET",
+                        str(rendition["link"]),
+                        timeout=self._timeout_seconds,
+                    ) as media_response:
+                        media_response.raise_for_status()
+                        with output_path.open("xb") as output:
+                            for chunk in media_response.iter_bytes():
+                                output.write(chunk)
+                    if output_path.stat().st_size <= 0:
+                        output_path.unlink(missing_ok=True)
+                        raise MaterialAcquisitionError(
+                            f"Pexels returned an empty file for asset {asset_id}"
+                        )
+                    downloads.append(
+                        DownloadedMaterial(
+                            path=output_path,
+                            asset_id=asset_id,
+                            width=int(rendition["width"]),
+                            height=int(rendition["height"]),
+                            duration_seconds=duration,
+                            source_url=str(video.get("url", "")),
+                            creator=(video.get("user") or {}).get("name"),
+                            search_term=term,
+                        )
+                    )
+                    seen_ids.add(asset_id)
+                    made_progress = True
+                    break
                 if len(downloads) >= max_files:
-                    self._write_metadata(destination, downloads)
-                    return downloads
+                    break
+            if not made_progress:
+                break
         self._write_metadata(destination, downloads)
         if not downloads:
             raise MaterialAcquisitionError("Pexels returned no usable landscape video materials")

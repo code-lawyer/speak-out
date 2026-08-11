@@ -504,6 +504,7 @@ def _build_stage_commands(
     allow_duplicate_site: bool,
     script_revision: str | None,
     material_revision: str | None,
+    material_count: int | None,
     bgm_directory: Path | None,
     narration_audio: Path | None,
     subtitles: Path | None,
@@ -634,6 +635,8 @@ def _build_stage_commands(
             )
             if material_revision is not None:
                 args += ("--material-revision", material_revision)
+            if material_count is not None:
+                args += ("--material-count", str(material_count))
             if bgm_directory is not None:
                 args += ("--bgm-directory", str(bgm_directory.resolve()))
             if narration_audio is not None:
@@ -674,6 +677,10 @@ def _build_stage_commands(
             elif not allow_edge_tts_data_transfer:
                 blockers.append("Edge TTS data-transfer approval is required")
             if material_revision is not None:
+                if material_count is not None:
+                    blockers.append(
+                        "--material-count applies only to Pexels acquisition"
+                    )
                 material = _preflight_artifact(
                     workspace,
                     product,
@@ -804,6 +811,14 @@ def run_pipeline(
     ] = False,
     script_revision: Annotated[str | None, typer.Option(help="Approved video script.")] = None,
     material_revision: Annotated[str | None, typer.Option(help="Local material revision.")] = None,
+    material_count: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            max=36,
+            help="Number of distinct Pexels clips to acquire; remote materials only.",
+        ),
+    ] = None,
     bgm_directory: Annotated[Path | None, typer.Option(help="Optional BGM directory.")] = None,
     narration_audio: Annotated[
         Path | None,
@@ -845,6 +860,7 @@ def run_pipeline(
         allow_duplicate_site=allow_duplicate_site,
         script_revision=script_revision,
         material_revision=material_revision,
+        material_count=material_count,
         bgm_directory=bgm_directory,
         narration_audio=narration_audio,
         subtitles=subtitles,
@@ -1262,6 +1278,14 @@ def render_video(
         str | None,
         typer.Option(help="Local video-material revision; omit to acquire from Pexels."),
     ] = None,
+    material_count: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            max=36,
+            help="Number of distinct Pexels clips to acquire; remote materials only.",
+        ),
+    ] = None,
     bgm_directory: Annotated[
         Path | None,
         typer.Option(help="Optional directory; one audio file is selected randomly."),
@@ -1302,6 +1326,7 @@ def render_video(
             VideoRenderRequest(
                 script_revision=script_revision,
                 material_revision=material_revision,
+                material_count=material_count,
                 bgm_directory=bgm_directory,
                 narration_audio=narration_audio,
                 subtitles=subtitles,
