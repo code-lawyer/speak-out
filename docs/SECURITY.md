@@ -12,7 +12,7 @@ The user explicitly chose one plaintext, editable `.local/secrets.toml` file ins
 
 ## Browser profiles
 
-Each platform uses a dedicated Chrome Profile under `.local/browser-profiles/`. The program must state which site will open and what login state will be retained before launching Chrome. Chrome 116 or newer is required and checked by `acp doctor` and again over CDP. `acp social close` closes only the selected dedicated Profile session. The user's default Chrome Profile is out of scope.
+Each platform uses a dedicated Chrome Profile under `.local/browser-profiles/`. The program must state which site will open and what login state will be retained before launching Chrome. Chrome 116 or newer is required and checked by `speak-out doctor` and again over CDP. `speak-out social close` closes only the selected dedicated Profile session. The user's default Chrome Profile is out of scope.
 
 Failed or uncertain browser publication may save a diagnostic screenshot under the ignored Product `logs/` directory. It can contain visible account-page information, so it must remain local and must not be attached to public issues without review.
 

@@ -117,6 +117,10 @@ class ProductWorkspace:
         ArtifactKind.SOCIAL_COPY: Path("publish") / "copy",
     }
     _MANIFEST_NAME = ".artifact.json"
+    _STAGING_PATHS = {
+        ArtifactKind.VIDEO_RENDER: Path("video") / "work",
+        ArtifactKind.SOCIAL_COPY: Path("publish") / ".staging",
+    }
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
@@ -145,6 +149,44 @@ class ProductWorkspace:
         with manifest_path.open("rb") as handle:
             manifest = ProductManifest.model_validate(tomllib.load(handle))
         return Product(root=root, manifest=manifest)
+
+    def resolve_artifact_file(
+        self,
+        product: Product,
+        kind: ArtifactKind,
+        revision: str,
+        relative_path: str,
+    ) -> Path:
+        """Resolve one Product artifact file without exposing layout rules to callers."""
+
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("artifact path must stay inside its revision")
+        revision_root = product.root / self._ARTIFACT_PATHS[kind] / revision
+        candidate = revision_root / relative
+        if not candidate.is_file() or candidate.is_symlink():
+            raise ArtifactIntegrityError(
+                (f"artifact file is missing: {kind.value}:{revision}:{relative.as_posix()}",)
+            )
+        return candidate
+
+    def create_staging_directory(
+        self,
+        product: Product,
+        kind: ArtifactKind,
+        purpose: str,
+    ) -> Path:
+        """Create one private Product-local staging directory for a known artifact area."""
+
+        if kind not in self._STAGING_PATHS:
+            raise ValueError(f"artifact kind has no staging area: {kind.value}")
+        if not purpose or any(character not in "abcdefghijklmnopqrstuvwxyz-" for character in purpose):
+            raise ValueError("staging purpose must contain lowercase letters and hyphens only")
+        staging_root = product.root / self._STAGING_PATHS[kind]
+        staging_root.mkdir(parents=True, exist_ok=True)
+        path = staging_root / f"{purpose}-{uuid4().hex}"
+        path.mkdir(exist_ok=False)
+        return path
 
     def add_revision(
         self,

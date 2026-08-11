@@ -3,13 +3,13 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-content-pipeline"
+name = "speak-out"
 version = "0.1.0"
 description = "Local-first article, explainer-video, and multi-platform publishing pipeline for AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
-authors = [{ name = "Agent Content Pipeline contributors" }]
+authors = [{ name = "Speak Out contributors" }]
 dependencies = [
   "edge-tts>=7.2,<8",
   "httpx[socks]>=0.28,<1",
@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
+speak-out = "agent_content_pipeline.cli:app"
 acp = "agent_content_pipeline.cli:app"
 
 [dependency-groups]

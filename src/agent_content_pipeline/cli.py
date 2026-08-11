@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import sys
 import time
 from datetime import date
@@ -16,6 +15,9 @@ from .diagnostics import SystemDoctor
 from .pipeline import (
     ArticlePublicationBundle,
     ArticlePublicationWorkflow,
+    PipelinePlanner,
+    PipelinePlanningError,
+    PipelinePlanRequest,
     article_publication_content_digest,
     article_publication_approval_key,
     load_article_publication_bundle,
@@ -35,7 +37,6 @@ from .orchestration import (
     ReconciliationNotAllowed,
     ReconciliationOutcome,
     RetryNotAllowed,
-    StageCommand,
 )
 from .state import (
     ApprovalLedger,
@@ -69,7 +70,6 @@ from .social.workflow import (
     SocialPublicationWorkflow,
     SocialPublicationWorkflowError,
 )
-from .stages import PipelineStage
 from .workspace import (
     ArtifactKind,
     ArtifactIntegrityError,
@@ -129,7 +129,7 @@ def _verified_article_bundle(
 
 
 app = typer.Typer(
-    name="acp",
+    name="speak-out",
     help="Create, render, and publish local content Products.",
     no_args_is_help=True,
 )
@@ -281,7 +281,12 @@ def preview_article(
     if bundle.wechat_layout_profile is not None:
         payload["wechatLayoutProfile"] = bundle.wechat_layout_profile
         payload["wechatPreviewPath"] = str(
-            product.root / "article" / article_revision / "index.html"
+            workspace.resolve_artifact_file(
+                product,
+                ArtifactKind.ARTICLE,
+                article_revision,
+                "index.html",
+            )
         )
     if json_output:
         typer.echo(json.dumps(payload, ensure_ascii=False))
@@ -530,314 +535,6 @@ def publish_article(
         raise typer.Exit(code=1)
 
 
-def _stage_command_key(stage: str, args: tuple[str, ...]) -> str:
-    encoded = json.dumps([stage, *args], ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return f"{stage}:{hashlib.sha256(encoded).hexdigest()}"
-
-
-def _preflight_artifact(
-    workspace: ProductWorkspace,
-    product: Product,
-    kind: ArtifactKind,
-    revision: str,
-    blockers: list[str],
-) -> ArtifactRevision | None:
-    try:
-        return workspace.verify_revision(product, kind, revision)
-    except ArtifactIntegrityError as error:
-        blockers.extend(error.issues)
-        return None
-
-
-def _build_stage_commands(
-    *,
-    project_root: Path,
-    product_root: Path,
-    stages: list[str],
-    article_revision: str | None,
-    cover_revision: str | None,
-    target_slug: str | None,
-    allow_duplicate_site: bool,
-    script_revision: str | None,
-    material_revision: str | None,
-    material_count: int | None,
-    bgm_directory: Path | None,
-    narration_audio: Path | None,
-    subtitles: Path | None,
-    allow_edge_tts_data_transfer: bool,
-    allow_pexels_data_transfer: bool,
-    video_revision: str | None,
-    copy_revision: str | None,
-) -> tuple[StageCommand, ...]:
-    workspace = ProductWorkspace(product_root.parent)
-    product = workspace.load(product_root)
-    project_root = project_root.resolve()
-    product_root = product.root.resolve()
-    approvals = ApprovalLedger(product.root)
-    publications = PublicationLedger(product.root)
-    allowed = {item.value for item in PipelineStage}
-    invalid = [stage for stage in stages if stage not in allowed]
-    if invalid:
-        raise typer.BadParameter("unsupported stage: " + ", ".join(invalid), param_hint="--stage")
-    if not stages:
-        raise typer.BadParameter("at least one --stage is required", param_hint="--stage")
-
-    commands: list[StageCommand] = []
-    for stage in stages:
-        stage_name = PipelineStage(stage)
-        blockers: list[str] = []
-        if stage_name is PipelineStage.ARTICLE:
-            try:
-                LocalConfig(project_root).load()
-            except Exception:
-                blockers.append(
-                    "website/WeChat production credentials are missing or invalid"
-                )
-            if not article_revision or not cover_revision:
-                raise typer.BadParameter(
-                    "article stage requires --article-revision and --cover-revision",
-                    param_hint="--stage article",
-                )
-            destination_slug = target_slug or product.manifest.slug
-            if destination_slug != product.manifest.slug and not allow_duplicate_site:
-                raise typer.BadParameter(
-                    "an override slug creates a duplicate website article; "
-                    "explicit --allow-duplicate-site is required"
-                )
-            args = (
-                "article",
-                "publish",
-                "--project-root",
-                str(project_root),
-                "--product",
-                str(product_root),
-                "--article-revision",
-                article_revision,
-                "--cover-revision",
-                cover_revision,
-            )
-            if target_slug is not None:
-                args += ("--target-slug", target_slug)
-            if allow_duplicate_site:
-                args += ("--allow-duplicate-site",)
-            args += ("--execute", "--json")
-            key = article_publication_approval_key(
-                article_revision,
-                cover_revision,
-                destination_slug,
-                True,
-            )
-            bundle = None
-            try:
-                bundle = load_article_publication_bundle(
-                    workspace,
-                    product,
-                    article_revision,
-                    cover_revision,
-                )
-            except ArtifactIntegrityError as error:
-                blockers.extend(error.issues)
-            except ArticleValidationError as error:
-                blockers.extend(error.issues)
-            if bundle is not None and not approvals.has(
-                ApprovalScope.ARTICLE,
-                article_revision,
-                bundle.article_digest,
-            ):
-                blockers.append(f"missing exact approval: article:{article_revision}")
-            if bundle is not None and not approvals.has(
-                ApprovalScope.COVER,
-                cover_revision,
-                bundle.cover_digest,
-            ):
-                blockers.append(f"missing exact approval: cover:{cover_revision}")
-            if bundle is not None:
-                publication_digest = article_publication_content_digest(
-                    bundle.article_digest,
-                    bundle.cover_digest,
-                    destination_slug,
-                    True,
-                )
-                if not approvals.has(
-                    ApprovalScope.ARTICLE_PUBLICATION,
-                    key,
-                    publication_digest,
-                ):
-                    blockers.append(
-                        "missing exact approval: article-publication:" + key
-                    )
-            prior_publication = publications.get_state("website-wechat", key)
-            if prior_publication == "succeeded":
-                blockers.append("website/WeChat publication already succeeded")
-            elif prior_publication in {"partial", "unknown", "running"}:
-                blockers.append(
-                    f"website/WeChat prior state is {prior_publication}; reconcile before retry"
-                )
-        elif stage_name is PipelineStage.VIDEO:
-            if not script_revision:
-                raise typer.BadParameter(
-                    "video stage requires --script-revision",
-                    param_hint="--stage video",
-                )
-            args = (
-                "video",
-                "render",
-                "--project-root",
-                str(project_root),
-                "--product",
-                str(product_root),
-                "--script-revision",
-                script_revision,
-            )
-            if material_revision is not None:
-                args += ("--material-revision", material_revision)
-            if material_count is not None:
-                args += ("--material-count", str(material_count))
-            if bgm_directory is not None:
-                args += ("--bgm-directory", str(bgm_directory.resolve()))
-            if narration_audio is not None:
-                args += ("--narration-audio", str(narration_audio.resolve()))
-            if subtitles is not None:
-                args += ("--subtitles", str(subtitles.resolve()))
-            if allow_edge_tts_data_transfer:
-                args += ("--allow-edge-tts-data-transfer",)
-            if allow_pexels_data_transfer:
-                args += ("--allow-pexels-data-transfer",)
-            args += ("--json",)
-            key = _stage_command_key(stage, args)
-            script = _preflight_artifact(
-                workspace,
-                product,
-                ArtifactKind.VIDEO_SCRIPT,
-                script_revision,
-                blockers,
-            )
-            if script is not None and not approvals.has(
-                ApprovalScope.VIDEO_SCRIPT,
-                script_revision,
-                script.digest,
-            ):
-                blockers.append(
-                    f"missing exact approval: video-script:{script_revision}"
-                )
-            if (narration_audio is None) != (subtitles is None):
-                blockers.append(
-                    "local narration requires both --narration-audio and --subtitles"
-                )
-            local_narration = narration_audio is not None and subtitles is not None
-            if local_narration:
-                if not narration_audio.is_file():
-                    blockers.append(f"local narration audio is missing: {narration_audio}")
-                if not subtitles.is_file():
-                    blockers.append(f"local subtitles are missing: {subtitles}")
-            elif not allow_edge_tts_data_transfer:
-                blockers.append("Edge TTS data-transfer approval is required")
-            if material_revision is not None:
-                if material_count is not None:
-                    blockers.append(
-                        "--material-count applies only to Pexels acquisition"
-                    )
-                material = _preflight_artifact(
-                    workspace,
-                    product,
-                    ArtifactKind.VIDEO_MATERIAL,
-                    material_revision,
-                    blockers,
-                )
-                if material is not None and not any(
-                    path.is_file()
-                    and path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
-                    for path in material.root.iterdir()
-                ):
-                    blockers.append(
-                        f"video-material revision contains no supported files: {material_revision}"
-                    )
-            elif not allow_pexels_data_transfer:
-                blockers.append("Pexels data-transfer approval is required")
-        else:
-            if not video_revision or not copy_revision:
-                raise typer.BadParameter(
-                    f"{stage} requires --video-revision and --copy-revision",
-                    param_hint=f"--stage {stage}",
-                )
-            platform = stage_name.platform
-            assert platform is not None
-            args = (
-                "social",
-                "publish",
-                "--project-root",
-                str(project_root),
-                "--product",
-                str(product_root),
-                "--platform",
-                platform.value,
-                "--video-revision",
-                video_revision,
-                "--copy-revision",
-                copy_revision,
-                "--execute",
-                "--json",
-            )
-            key = social_publication_approval_key(video_revision, copy_revision, platform)
-            video = _preflight_artifact(
-                workspace,
-                product,
-                ArtifactKind.VIDEO_RENDER,
-                video_revision,
-                blockers,
-            )
-            copy = _preflight_artifact(
-                workspace,
-                product,
-                ArtifactKind.SOCIAL_COPY,
-                copy_revision,
-                blockers,
-            )
-            if video is not None and not approvals.has(
-                ApprovalScope.VIDEO,
-                video_revision,
-                video.digest,
-            ):
-                blockers.append(f"missing exact approval: video:{video_revision}")
-            if video is not None and copy is not None:
-                publication_digest = social_publication_content_digest(
-                    video.digest,
-                    copy.digest,
-                    platform,
-                )
-                if not approvals.has(
-                    ApprovalScope.SOCIAL_PUBLICATION,
-                    key,
-                    publication_digest,
-                ):
-                    blockers.append(
-                        "missing exact approval: social-publication:" + key
-                    )
-            prior_publication = publications.get_state(stage, key)
-            if prior_publication == SocialPublicationState.SUBMITTED.value:
-                blockers.append(f"{platform.value} publication already submitted")
-            elif prior_publication in {
-                SocialPublicationState.UNKNOWN.value,
-                SocialPublicationState.WAITING_FOR_USER.value,
-                "partial",
-                "running",
-            }:
-                blockers.append(
-                    f"{platform.value} prior state is {prior_publication}; "
-                    "retry or reconcile before another submission"
-                )
-        commands.append(
-            StageCommand(
-                stage=stage,
-                idempotency_key=key,
-                args=args,
-                blockers=tuple(blockers),
-            )
-        )
-    return tuple(commands)
-
 
 def _emit_pipeline_result(result, json_output: bool) -> None:
     if json_output:
@@ -849,7 +546,7 @@ def _emit_pipeline_result(result, json_output: bool) -> None:
         for blocker in stage.output.get("blockers", []):
             typer.echo(f"  BLOCKED: {blocker}")
         if result.mode == "dry-run":
-            typer.echo("  acp " + " ".join(stage.args))
+            typer.echo("  speak-out " + " ".join(stage.args))
 
 
 @app.command("run")
@@ -908,25 +605,31 @@ def run_pipeline(
     ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
-    commands = _build_stage_commands(
-        project_root=project_root,
-        product_root=product_root,
-        stages=stages,
-        article_revision=article_revision,
-        cover_revision=cover_revision,
-        target_slug=target_slug,
-        allow_duplicate_site=allow_duplicate_site,
-        script_revision=script_revision,
-        material_revision=material_revision,
-        material_count=material_count,
-        bgm_directory=bgm_directory,
-        narration_audio=narration_audio,
-        subtitles=subtitles,
-        allow_edge_tts_data_transfer=allow_edge_tts_data_transfer,
-        allow_pexels_data_transfer=allow_pexels_data_transfer,
-        video_revision=video_revision,
-        copy_revision=copy_revision,
-    )
+    workspace = ProductWorkspace(product_root.parent)
+    product = workspace.load(product_root)
+    try:
+        commands = PipelinePlanner(workspace=workspace, product=product).plan(
+            PipelinePlanRequest(
+                project_root=project_root,
+                stages=tuple(stages),
+                article_revision=article_revision,
+                cover_revision=cover_revision,
+                target_slug=target_slug,
+                allow_duplicate_site=allow_duplicate_site,
+                script_revision=script_revision,
+                material_revision=material_revision,
+                material_count=material_count,
+                bgm_directory=bgm_directory,
+                narration_audio=narration_audio,
+                subtitles=subtitles,
+                allow_edge_tts_data_transfer=allow_edge_tts_data_transfer,
+                allow_pexels_data_transfer=allow_pexels_data_transfer,
+                video_revision=video_revision,
+                copy_revision=copy_revision,
+            )
+        )
+    except PipelinePlanningError as error:
+        raise typer.BadParameter(str(error), param_hint="--stage") from error
     result = PipelineOrchestrator(StageAttemptLedger(product_root)).run(
         commands,
         execute=execute,

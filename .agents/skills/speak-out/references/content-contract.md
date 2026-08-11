@@ -17,7 +17,7 @@ The public release article must not contain internal labels such as “原始记
 Store those raw notes and sources in an immutable `source/vNNN` revision instead. Every artifact revision includes a generated `.artifact.json`; do not edit it or any sealed file.
 
 The WeChat body contains text paragraphs only. Do not add inline article images.
-Generate it with `acp artifact add-article --mdx ...`; do not hand-author or
+Generate it with `speak-out artifact add-article --mdx ...`; do not hand-author or
 silently restyle it. The `wechat-editorial-v1` profile renders headings as
 numbered editorial sections and applies fixed inline styles for title, date,
 body, quotes, lists, and emphasis.

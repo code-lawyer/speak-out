@@ -32,6 +32,7 @@ def test_page_controller_uses_cdp_for_visible_form_and_file_interactions(tmp_pat
     assert page.exists("input[type=file]") is True
     page.set_files("input[type=file]", [video])
     page.fill("input[name=title]", "测试标题")
+    assert page.read_value("input[name=title]") is None
     assert page.fill_tags(
         "input[name=tag]",
         ["AI", "未来"],
@@ -42,7 +43,7 @@ def test_page_controller_uses_cdp_for_visible_form_and_file_interactions(tmp_pat
     methods = [item[0] for item in cdp.calls]
     assert "Page.navigate" in methods
     assert "DOM.setFileInputFiles" in methods
-    assert methods.count("Runtime.evaluate") == 5
+    assert methods.count("Runtime.evaluate") == 6
     set_files = next(item for item in cdp.calls if item[0] == "DOM.setFileInputFiles")
     assert set_files[1]["files"] == [str(video.resolve())]
     tag_call = next(
@@ -64,4 +65,12 @@ def test_page_controller_uses_cdp_for_visible_form_and_file_interactions(tmp_pat
     assert "approved.length === chips.length" in verification
     assert ".replace(/删除/g" not in verification
     assert ".replace(/[×✕]/g" not in verification
+    readback_call = next(
+        item
+        for item in cdp.calls
+        if item[0] == "Runtime.evaluate" and "element.isContentEditable" in item[1]["expression"]
+    )
+    assert "document.querySelector" in readback_call[1]["expression"]
+    assert "element.value" in readback_call[1]["expression"]
+    assert "element.innerText" in readback_call[1]["expression"]
     assert all(item[2] == "session-1" for item in cdp.calls[2:])

@@ -18,6 +18,7 @@ class BrowserPage(Protocol):
     def navigate(self, url: str) -> None: ...
     def exists(self, selector: str) -> bool: ...
     def fill(self, selector: str, value: str) -> None: ...
+    def read_value(self, selector: str) -> str | None: ...
     def fill_tags(
         self,
         selector: str,
@@ -191,9 +192,19 @@ class VisibleChromePlatformPublisher:
                 state=SocialPublicationState.FAILED,
                 message="approved body and tags were not submitted because the body control is missing",
             )
-        page.fill(title_input, spec.title)
+        if not self._fill_and_verify(page, title_input, spec.title):
+            return SocialPublishResult(
+                platform=spec.platform,
+                state=SocialPublicationState.FAILED,
+                message="approved title could not be read back exactly; publication was not submitted",
+            )
         if spec.platform == SocialPlatform.BILIBILI:
-            page.fill(body_input, spec.body.strip())
+            if not self._fill_and_verify(page, body_input, spec.body.strip()):
+                return SocialPublishResult(
+                    platform=spec.platform,
+                    state=SocialPublicationState.FAILED,
+                    message="approved body could not be read back exactly; publication was not submitted",
+                )
             tag_input = self._wait_for_any(
                 page,
                 self.contract.tag_inputs,
@@ -217,7 +228,15 @@ class VisibleChromePlatformPublisher:
         else:
             topics = " ".join(f"#{tag.lstrip('#')}" for tag in spec.tags)
             body = " ".join(part for part in (spec.body.strip(), topics) if part)
-            page.fill(body_input, body)
+            if not self._fill_and_verify(page, body_input, body):
+                return SocialPublishResult(
+                    platform=spec.platform,
+                    state=SocialPublicationState.FAILED,
+                    message=(
+                        "approved body and tags could not be read back exactly; "
+                        "publication was not submitted"
+                    ),
+                )
         if (
             spec.platform == SocialPlatform.BILIBILI
             and spec.category
@@ -267,6 +286,26 @@ class VisibleChromePlatformPublisher:
                 return found
             time.sleep(0.5)
         return None
+
+    def _fill_and_verify(
+        self,
+        page: BrowserPage,
+        selector: str,
+        approved: str,
+    ) -> bool:
+        page.fill(selector, approved)
+        deadline = time.monotonic() + min(self._editor_timeout_seconds, 5)
+        normalized_approved = self._normalize_metadata(approved)
+        while time.monotonic() < deadline:
+            actual = page.read_value(selector)
+            if actual is not None and self._normalize_metadata(actual) == normalized_approved:
+                return True
+            time.sleep(0.2)
+        return False
+
+    @staticmethod
+    def _normalize_metadata(value: str) -> str:
+        return " ".join(value.split())
 
     @staticmethod
     def _click_text(page: BrowserPage, texts: Sequence[str]) -> bool:

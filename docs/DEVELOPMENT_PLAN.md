@@ -3,7 +3,7 @@
 ## Phase 0 — repository and contracts
 
 - Establish packaging, license, third-party notices, security policy, Product layout, domain vocabulary, and test seams.
-- Implement `acp doctor`, `acp config`, `acp product create`, `acp product status`.
+- Implement `speak-out doctor`, `speak-out config`, `speak-out product create`, `speak-out product status`.
 - Prove reproducible setup with Python 3.12 and uv on Windows.
 
 Exit: a clean clone can create and inspect a Product without external accounts.
@@ -51,12 +51,12 @@ Exit: each Adapter passes offline contract tests and one separately confirmed li
 - Run article publication and video rendering as independent branches.
 - Add video preview and distribution approval gates.
 - Add per-stage retry, reconciliation, and idempotency safeguards.
-- Initialize and validate a project-local `content-pipeline` Skill with concise instructions and progressive references.
-- Add `acp run`, `acp retry`, and machine-readable JSON output.
+- Initialize and validate a project-local `speak-out` Skill with concise instructions and progressive references.
+- Add `speak-out run`, `speak-out retry`, and machine-readable JSON output.
 
 Exit: the full v1 release gate in `PRODUCT.md` is proven with current-state evidence.
 
-Implementation status: the offline orchestration slice is complete. `acp run` is dry-run by default, assigns a durable run ID, and preflights artifact integrity, exact approvals, Edge/Pexels transfer acknowledgements, and prior publication state before showing `planned` or explicit `blocked` stages. Execute mode does not start a child process for a preflight-blocked stage. External destinations are atomically claimed before publication, and ambiguous VPS transport/server outcomes remain `unknown` until reconciliation. Independent branches run without rollback and record centrally redacted stage attempts. `acp retry` replays only the latest `failed` or safely pre-submit `waiting_for_user` stage. `acp reconcile` appends explicit human evidence to resolve `unknown` or interrupted outcomes without rewriting history. The Pipeline verifies sealed article/cover revisions itself and constructs the outbound request from those exact bytes; legacy article bytes are still revalidated at every publication boundary. The visible Chrome 116+ Driver now supports version checks, transient reconnect, interrupt-safe cleanup, and explicit dedicated-Profile shutdown. Source revisions, video inspection, legacy state/artifact migration, explicit Edge/Pexels transfer gates, and a fully local narration option are implemented and tested. The phase exit remains open until the separately approved live release gate is completed.
+Implementation status: the offline orchestration slice is complete. `speak-out run` is dry-run by default, assigns a durable run ID, and preflights artifact integrity, exact approvals, Edge/Pexels transfer acknowledgements, and prior publication state before showing `planned` or explicit `blocked` stages. Execute mode does not start a child process for a preflight-blocked stage. External destinations are atomically claimed before publication, and ambiguous VPS transport/server outcomes remain `unknown` until reconciliation. Independent branches run without rollback and record centrally redacted stage attempts. `speak-out retry` replays only the latest `failed` or safely pre-submit `waiting_for_user` stage. `speak-out reconcile` appends explicit human evidence to resolve `unknown` or interrupted outcomes without rewriting history. The Pipeline verifies sealed article/cover revisions itself and constructs the outbound request from those exact bytes; legacy article bytes are still revalidated at every publication boundary. The visible Chrome 116+ Driver now supports version checks, transient reconnect, interrupt-safe cleanup, and explicit dedicated-Profile shutdown. Source revisions, video inspection, legacy state/artifact migration, explicit Edge/Pexels transfer gates, and a fully local narration option are implemented and tested. The phase exit remains open until the separately approved live release gate is completed.
 
 ## Verification discipline
 

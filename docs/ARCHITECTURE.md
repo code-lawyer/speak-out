@@ -51,7 +51,10 @@ Accept an approved video specification and produce inspected output artifacts. T
 remote run, but downloads an asset rendition only when its project cache key is
 absent. Product render revisions receive immutable hard links when supported
 and copies otherwise, preserving Product-local paths without unnecessary
-physical duplication.
+physical duplication. Workspace imports accept only manifest-verified Product
+render revisions whose sealed workflow records remote Pexels acquisition and
+whose attribution fields match the referenced Pexels asset; arbitrary recursive
+`materials.json` files and local-material renders are ignored.
 
 `WeChatArticleRenderer` owns the deterministic `wechat-editorial-v1` layout.
 New article revisions are constructed from MDX through this Module and carry a
@@ -65,7 +68,7 @@ Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction
 
 ### PlatformPublisher
 
-Validate platform metadata, confirm login, upload the approved MP4, submit immediate publication, and return a result. The social workflow reads copy from a manifest-verified byte snapshot and streams the approved MP4 into a private, unpredictable Product-local snapshot whose hash is checked against the sealed revision; that snapshot is retained through browser upload and then removed. Required metadata must be read back from the anchored platform control before submission; Bilibili requires the normalized tag-chip set to exactly equal the approval and the selected category value to match exactly. Each platform is an independent Adapter at this real seam.
+Validate platform metadata, confirm login, upload the approved MP4, submit immediate publication, and return a result. The social workflow reads copy from a manifest-verified byte snapshot and streams the approved MP4 into a private, unpredictable Product-local snapshot whose hash is checked against the sealed revision; that snapshot is retained through browser upload and then removed. Required metadata must be read back from the anchored platform control before submission. All three platforms require exact normalized title and body read-back; Xiaohongshu and Douyin include the approved hashtag sequence in that body check. Bilibili additionally requires the normalized tag-chip set to exactly equal the approval and the selected category value to match exactly. Each platform is an independent Adapter at this real seam.
 
 `SocialPublicationWorkflow` owns the approval recheck, atomic publication claim, Chrome/CDP resource lifetime, diagnostic capture, log write, and private-upload cleanup. The CLI only constructs the selected local Adapters and renders the structured outcome.
 
@@ -83,6 +86,6 @@ Stage plans and attempts use `planned`, `running`, `waiting_for_user`, `succeede
 
 Website/WeChat, rendering, and each social platform are separate publication domains. Success in one domain never implies success in another and is never rolled back by another domain's failure.
 
-`acp run` is dry-run by default. Execution persists each exact child command and continues other independent stages after a failure. `acp retry` is deliberately narrower: it replays only the latest exact command for a named `failed` or `waiting_for_user` stage. `unknown`, `partial`, and successful results cannot be replayed until externally reconciled or replaced by a newly approved revision.
+`speak-out run` is dry-run by default. Execution persists each exact child command and continues other independent stages after a failure. `speak-out retry` is deliberately narrower: it replays only the latest exact command for a named `failed` or `waiting_for_user` stage. `unknown`, `partial`, and successful results cannot be replayed until externally reconciled or replaced by a newly approved revision.
 
-`acp reconcile` never queries or mutates a destination. It records the user's external verification as a new Run. `unknown` or interrupted work may be reconciled as absent, which enables one exact retry; `unknown`, interrupted, or partial work may be reconciled as succeeded. Historical attempts remain unchanged.
+`speak-out reconcile` never queries or mutates a destination. It records the user's external verification as a new Run. `unknown` or interrupted work may be reconciled as absent, which enables one exact retry; `unknown`, interrupted, or partial work may be reconciled as succeeded. Historical attempts remain unchanged.

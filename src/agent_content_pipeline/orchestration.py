@@ -120,7 +120,7 @@ class PipelineOrchestrator:
                     output = {
                         "blockers": [
                             f"prior state is {prior.state.value}; "
-                            "use acp retry or reconcile when allowed"
+                            "use speak-out retry or reconcile when allowed"
                         ],
                         "priorAttempt": prior.id,
                     }
@@ -179,7 +179,7 @@ class PipelineOrchestrator:
                         args=command.args,
                         state=StageState.BLOCKED,
                         output={
-                            "reason": f"prior state is {prior.state.value}; use acp retry when allowed"
+                            "reason": f"prior state is {prior.state.value}; use speak-out retry when allowed"
                         },
                         attempt_id=prior.id,
                     )

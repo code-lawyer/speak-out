@@ -6,13 +6,18 @@ import random
 import shutil
 from pathlib import Path
 from typing import Protocol, Sequence
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import LocalSecrets
 from ..state import ApprovalLedger, ApprovalScope
-from ..workspace import ArtifactKind, ArtifactRevision, Product, ProductWorkspace
+from ..workspace import (
+    ArtifactKind,
+    ArtifactRevision,
+    ArtifactSnapshot,
+    Product,
+    ProductWorkspace,
+)
 from .materials import DownloadedMaterial, PexelsMaterialSource
 from .narration import EdgeTtsNarrator, NarrationResult
 from .renderer import FfmpegExplainerRenderer, VideoRenderResult
@@ -87,6 +92,77 @@ class VideoWorkflowResult(BaseModel):
     final_path: Path
 
 
+class VideoRenderPreflight(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    script: ArtifactSnapshot | None = None
+    issues: tuple[str, ...] = ()
+
+
+def preflight_video_render(
+    *,
+    workspace: ProductWorkspace,
+    product: Product,
+    approvals: ApprovalReader,
+    request: VideoRenderRequest,
+) -> VideoRenderPreflight:
+    """Return the same safety blockers used by planning and execution."""
+
+    issues: list[str] = []
+    script: ArtifactSnapshot | None = None
+    try:
+        script = workspace.read_verified_revision(
+            product,
+            ArtifactKind.VIDEO_SCRIPT,
+            request.script_revision,
+        )
+    except ValueError as error:
+        issues.append(str(error))
+    else:
+        if not approvals.has(
+            ApprovalScope.VIDEO_SCRIPT,
+            request.script_revision,
+            script.digest,
+        ):
+            issues.append(
+                f"missing exact approval: video-script:{request.script_revision}"
+            )
+    if (request.narration_audio is None) != (request.subtitles is None):
+        issues.append("local narration requires both --narration-audio and --subtitles")
+    local_narration = request.narration_audio is not None and request.subtitles is not None
+    if local_narration:
+        if not request.narration_audio.is_file():
+            issues.append(f"local narration audio is missing: {request.narration_audio}")
+        if not request.subtitles.is_file():
+            issues.append(f"local subtitles are missing: {request.subtitles}")
+    elif not request.allow_edge_tts_data_transfer:
+        issues.append("Edge TTS data-transfer approval is required")
+    if request.material_revision is not None:
+        if request.material_count is not None:
+            issues.append("--material-count applies only to Pexels acquisition")
+        try:
+            material = workspace.verify_revision(
+                product,
+                ArtifactKind.VIDEO_MATERIAL,
+                request.material_revision,
+            )
+        except ValueError as error:
+            issues.append(str(error))
+        else:
+            if not any(
+                path.is_file()
+                and path.suffix.lower() in VideoRenderWorkflow._VIDEO_SUFFIXES
+                for path in material.root.iterdir()
+            ):
+                issues.append(
+                    "video-material revision contains no supported files: "
+                    f"{request.material_revision}"
+                )
+    elif not request.allow_pexels_data_transfer:
+        issues.append("Pexels data-transfer approval is required")
+    return VideoRenderPreflight(script=script, issues=tuple(issues))
+
+
 class VideoRenderWorkflow:
     """Bind approved bytes to every render input and commit one complete revision."""
 
@@ -115,27 +191,33 @@ class VideoRenderWorkflow:
         self._renderer = renderer or FfmpegExplainerRenderer()
 
     def render(self, request: VideoRenderRequest) -> VideoWorkflowResult:
-        script_snapshot = self._workspace.read_verified_revision(
-            self._product,
-            ArtifactKind.VIDEO_SCRIPT,
-            request.script_revision,
+        preflight = preflight_video_render(
+            workspace=self._workspace,
+            product=self._product,
+            approvals=self._approval_ledger,
+            request=request,
         )
-        if not self._approval_ledger.has(
-            ApprovalScope.VIDEO_SCRIPT,
-            request.script_revision,
-            script_snapshot.digest,
-        ):
+        if preflight.issues:
+            guidance: list[str] = []
+            if "Edge TTS data-transfer approval is required" in preflight.issues:
+                guidance.append("use --allow-edge-tts-data-transfer or local narration")
+            if "Pexels data-transfer approval is required" in preflight.issues:
+                guidance.append("use --allow-pexels-data-transfer or local materials")
             raise VideoWorkflowError(
-                f"explicit video-script approval is required for {request.script_revision}"
+                "; ".join((*preflight.issues, *guidance))
             )
+        assert preflight.script is not None
+        script_snapshot = preflight.script
         script_bytes = script_snapshot.files.get("script.json")
         if script_bytes is None:
             raise VideoWorkflowError("video-script revision is missing script.json")
         spec = VideoScriptSpec.model_validate_json(script_bytes)
-        self._validate_request(request)
 
-        staging = self._product.root / "video" / "work" / f"render-{uuid4().hex}"
-        staging.mkdir(parents=True, exist_ok=False)
+        staging = self._workspace.create_staging_directory(
+            self._product,
+            ArtifactKind.VIDEO_RENDER,
+            "render",
+        )
         try:
             materials = self._prepare_materials(request, spec, staging)
             bgm = self._prepare_bgm(request.bgm_directory, staging)
@@ -181,36 +263,6 @@ class VideoRenderWorkflow:
             rendered=rendered,
             final_path=final_path,
         )
-
-    def _validate_request(self, request: VideoRenderRequest) -> None:
-        if (request.narration_audio is None) != (request.subtitles is None):
-            raise VideoWorkflowError(
-                "--narration-audio and --subtitles must be supplied together"
-            )
-        if request.narration_audio is not None:
-            if not request.narration_audio.is_file():
-                raise VideoWorkflowError(
-                    f"local narration audio is missing: {request.narration_audio}"
-                )
-            assert request.subtitles is not None
-            if not request.subtitles.is_file():
-                raise VideoWorkflowError(f"local subtitles are missing: {request.subtitles}")
-        elif not request.allow_edge_tts_data_transfer:
-            raise VideoWorkflowError(
-                "Edge TTS sends the approved narration text to Microsoft; explicit "
-                "--allow-edge-tts-data-transfer is required, or provide local "
-                "--narration-audio and --subtitles"
-            )
-        if request.material_revision is None and not request.allow_pexels_data_transfer:
-            raise VideoWorkflowError(
-                "Pexels receives the approved material search terms; explicit "
-                "--allow-pexels-data-transfer is required, or provide --material-revision"
-            )
-        if request.material_revision is not None and request.material_count is not None:
-            raise VideoWorkflowError(
-                "--material-count applies only to Pexels acquisition; omit it with "
-                "--material-revision"
-            )
 
     def _prepare_materials(
         self,

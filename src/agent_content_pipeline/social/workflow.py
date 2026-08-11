@@ -144,11 +144,17 @@ class SocialPublicationWorkflow:
             ) from error
         bundle = SocialCopyBundle.model_validate_json(copy_json)
         platform_copy = bundle.platforms[request.platform]
-        source_video = video.root / "output" / "final.mp4"
-        if not source_video.is_file():
-            raise SocialPublicationWorkflowError(
-                f"approved video file is missing: {source_video}"
+        try:
+            source_video = self._workspace.resolve_artifact_file(
+                self._product,
+                ArtifactKind.VIDEO_RENDER,
+                request.video_revision,
+                "output/final.mp4",
             )
+        except ValueError as error:
+            raise SocialPublicationWorkflowError(
+                f"approved video file is missing: {request.video_revision}"
+            ) from error
         spec = SocialPostSpec(
             platform=request.platform,
             title=platform_copy.title,

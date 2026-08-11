@@ -246,3 +246,56 @@ def test_verified_revision_copy_must_remain_inside_the_product(tmp_path):
             "v001",
             tmp_path / "escaped-materials",
         )
+
+
+def test_workspace_resolves_artifact_files_and_rejects_path_escape(tmp_path):
+    workspace = ProductWorkspace(tmp_path / "workspace")
+    product = workspace.create(
+        ProductCreateRequest(
+            title="路径解析",
+            slug="artifact-path-resolution",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    revision = workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.ARTICLE,
+            files={"index.html": b"<html></html>"},
+        ),
+    )
+
+    assert workspace.resolve_artifact_file(
+        product,
+        ArtifactKind.ARTICLE,
+        revision.revision,
+        "index.html",
+    ) == revision.root / "index.html"
+    with pytest.raises(ValueError, match="inside its revision"):
+        workspace.resolve_artifact_file(
+            product,
+            ArtifactKind.ARTICLE,
+            revision.revision,
+            "../product.toml",
+        )
+
+
+def test_workspace_creates_private_staging_in_the_owned_artifact_area(tmp_path):
+    workspace = ProductWorkspace(tmp_path / "workspace")
+    product = workspace.create(
+        ProductCreateRequest(
+            title="暂存目录",
+            slug="workspace-staging",
+            created_on=date(2026, 8, 10),
+        )
+    )
+
+    staging = workspace.create_staging_directory(
+        product,
+        ArtifactKind.VIDEO_RENDER,
+        "cache-import",
+    )
+
+    assert staging.is_dir()
+    assert staging.is_relative_to(product.root)
+    assert staging.parent.name == "work"

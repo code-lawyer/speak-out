@@ -144,6 +144,24 @@ class ChromePageController:
 """.strip()
         self.evaluate(expression)
 
+    def read_value(self, selector: str) -> str | None:
+        """Read the value from one anchored input/editor control."""
+
+        value = self.evaluate(
+            f"""
+(() => {{
+  const element = document.querySelector({json.dumps(selector)});
+  if (!element) return null;
+  if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {{
+    return element.value;
+  }}
+  if (element.isContentEditable) return element.innerText;
+  return element.textContent;
+}})()
+""".strip()
+        )
+        return value if isinstance(value, str) else None
+
     def fill_tags(
         self,
         selector: str,

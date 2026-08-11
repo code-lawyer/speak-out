@@ -17,6 +17,7 @@ class FakePage:
         self.navigated = None
         self.submit_clicked = False
         self.tags = []
+        self.values = {}
 
     def navigate(self, url):
         self.navigated = url
@@ -41,6 +42,10 @@ class FakePage:
 
     def fill(self, selector, value):
         self.filled.append((selector, value))
+        self.values[selector] = value
+
+    def read_value(self, selector):
+        return self.values.get(selector)
 
     def set_files(self, selector, paths):
         self.files.extend(paths)
@@ -118,6 +123,65 @@ def test_platform_publisher_never_submits_when_approved_body_control_is_missing(
         SocialPlatform.XIAOHONGSHU,
         editor_timeout_seconds=0.01,
     ).publish(page, post(tmp_path, SocialPlatform.XIAOHONGSHU))
+
+    assert result.state == SocialPublicationState.FAILED
+    assert "body" in result.message
+    assert page.submit_clicked is False
+
+
+def test_each_platform_never_submits_when_title_readback_is_rewritten(tmp_path):
+    class RewrittenTitlePage(FakePage):
+        def read_value(self, selector):
+            value = super().read_value(selector)
+            if "标题" in selector and value is not None:
+                return value[:-1]
+            return value
+
+    for platform in SocialPlatform:
+        page = RewrittenTitlePage(logged_in=True)
+        result = VisibleChromePlatformPublisher(
+            platform,
+            editor_timeout_seconds=0.01,
+        ).publish(page, post(tmp_path, platform))
+
+        assert result.state == SocialPublicationState.FAILED
+        assert "title" in result.message
+        assert page.submit_clicked is False
+
+
+def test_xiaohongshu_and_douyin_never_submit_rewritten_body_or_tags(tmp_path):
+    class RewrittenBodyPage(FakePage):
+        def read_value(self, selector):
+            value = super().read_value(selector)
+            if ("正文" in selector or "描述" in selector or "contenteditable" in selector) and value:
+                return value.replace("#AI", "")
+            return value
+
+    for platform in (SocialPlatform.XIAOHONGSHU, SocialPlatform.DOUYIN):
+        page = RewrittenBodyPage(logged_in=True)
+        result = VisibleChromePlatformPublisher(
+            platform,
+            editor_timeout_seconds=0.01,
+        ).publish(page, post(tmp_path, platform))
+
+        assert result.state == SocialPublicationState.FAILED
+        assert "body and tags" in result.message
+        assert page.submit_clicked is False
+
+
+def test_bilibili_never_submits_when_body_readback_is_rewritten(tmp_path):
+    class RewrittenBodyPage(FakePage):
+        def read_value(self, selector):
+            value = super().read_value(selector)
+            if ("简介" in selector or "contenteditable" in selector) and value:
+                return value + " 未批准内容"
+            return value
+
+    page = RewrittenBodyPage(logged_in=True)
+    result = VisibleChromePlatformPublisher(
+        SocialPlatform.BILIBILI,
+        editor_timeout_seconds=0.01,
+    ).publish(page, post(tmp_path, SocialPlatform.BILIBILI))
 
     assert result.state == SocialPublicationState.FAILED
     assert "body" in result.message

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from ..workspace import ArtifactIntegrityError, ArtifactKind, ProductWorkspace
 
 
 class MediaCacheStatus(BaseModel):
@@ -60,60 +62,153 @@ class ProjectMediaCache:
                 conflicts=0,
             )
         self.pexels_root.mkdir(parents=True, exist_ok=True)
-        for metadata_path in workspace_root.rglob("materials.json"):
+        workspace = ProductWorkspace(workspace_root)
+        for product_root in sorted(workspace_root.iterdir()):
+            if not product_root.is_dir() or not (product_root / "product.toml").is_file():
+                continue
             try:
-                records = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
+                product = workspace.load(product_root)
+            except (OSError, ValueError):
                 continue
-            if not isinstance(records, list):
-                continue
-            for record in records:
-                if not isinstance(record, dict) or record.get("provider") != "pexels":
+            for revision in workspace.list_revisions(product):
+                if revision.kind is not ArtifactKind.VIDEO_RENDER or revision.digest is None:
                     continue
-                asset_id = str(record.get("assetId", ""))
-                filename = str(record.get("file", ""))
+                staging = workspace.create_staging_directory(
+                    product,
+                    ArtifactKind.VIDEO_RENDER,
+                    "cache-import",
+                )
                 try:
-                    width = int(record.get("width", 0))
-                    height = int(record.get("height", 0))
-                except (TypeError, ValueError):
+                    workflow_copy = workspace.copy_verified_file(
+                        product,
+                        ArtifactKind.VIDEO_RENDER,
+                        revision.revision,
+                        "workflow.json",
+                        staging / "workflow.json",
+                    )
+                    metadata_copy = workspace.copy_verified_file(
+                        product,
+                        ArtifactKind.VIDEO_RENDER,
+                        revision.revision,
+                        "materials/materials.json",
+                        staging / "materials.json",
+                    )
+                    try:
+                        workflow_record = json.loads(
+                            workflow_copy.path.read_text(encoding="utf-8")
+                        )
+                        records = json.loads(metadata_copy.path.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeError, json.JSONDecodeError):
+                        continue
+                    if (
+                        not isinstance(workflow_record, dict)
+                        or workflow_record.get("profile") != "landscape-explainer-v1"
+                        or workflow_record.get("materialRevision") is not None
+                        or not isinstance(records, list)
+                    ):
+                        continue
+                    for record in records:
+                        parsed = self._pexels_record(record)
+                        if parsed is None:
+                            continue
+                        asset_id, filename, width, height = parsed
+                        try:
+                            source_copy = workspace.copy_verified_file(
+                                product,
+                                ArtifactKind.VIDEO_RENDER,
+                                revision.revision,
+                                f"materials/{filename}",
+                                staging / filename,
+                            )
+                        except ArtifactIntegrityError:
+                            continue
+                        if source_copy.path.stat().st_size <= 0:
+                            continue
+                        discovered += 1
+                        target = self.pexels_root / f"{asset_id}-{width}x{height}.mp4"
+                        if target.exists() or target.is_symlink():
+                            if (
+                                target.is_file()
+                                and not target.is_symlink()
+                                and self._same_content(source_copy.path, target)
+                            ):
+                                reused += 1
+                            else:
+                                conflicts += 1
+                            continue
+                        outcome = self._install_verified_copy(source_copy.path, target)
+                        if outcome == "imported":
+                            imported += 1
+                        elif outcome == "reused":
+                            reused += 1
+                        else:
+                            conflicts += 1
+                except ArtifactIntegrityError:
                     continue
-                relative = Path(filename)
-                if (
-                    not asset_id.isdigit()
-                    or not filename
-                    or width <= 0
-                    or height <= 0
-                    or relative.is_absolute()
-                    or ".." in relative.parts
-                ):
-                    continue
-                source = (metadata_path.parent / relative).resolve()
-                if (
-                    not source.is_relative_to(metadata_path.parent.resolve())
-                    or not source.is_file()
-                    or source.is_symlink()
-                    or source.stat().st_size <= 0
-                ):
-                    continue
-                discovered += 1
-                target = self.pexels_root / f"{asset_id}-{width}x{height}.mp4"
-                if target.is_file():
-                    if self._same_content(source, target):
-                        reused += 1
-                    else:
-                        conflicts += 1
-                    continue
-                try:
-                    os.link(source, target)
-                except OSError:
-                    shutil.copy2(source, target)
-                imported += 1
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
         return MediaCacheImportResult(
             discovered=discovered,
             imported=imported,
             reused=reused,
             conflicts=conflicts,
         )
+
+    @staticmethod
+    def _pexels_record(record: object) -> tuple[str, str, int, int] | None:
+        if not isinstance(record, dict) or record.get("provider") != "pexels":
+            return None
+        asset_id = str(record.get("assetId", ""))
+        filename = str(record.get("file", ""))
+        source_url = str(record.get("sourceUrl", ""))
+        search_term = str(record.get("searchTerm", "")).strip()
+        try:
+            width = int(record.get("width", 0))
+            height = int(record.get("height", 0))
+            duration = float(record.get("durationSeconds", 0))
+        except (TypeError, ValueError):
+            return None
+        relative = Path(filename)
+        parsed_source = urlparse(source_url)
+        if (
+            not asset_id.isdigit()
+            or filename != f"pexels-{asset_id}.mp4"
+            or width <= 0
+            or height <= 0
+            or duration <= 0
+            or not search_term
+            or parsed_source.scheme != "https"
+            or parsed_source.hostname not in {"pexels.com", "www.pexels.com"}
+            or asset_id not in parsed_source.path
+            or relative.is_absolute()
+            or len(relative.parts) != 1
+            or relative.suffix.lower() != ".mp4"
+        ):
+            return None
+        return asset_id, filename, width, height
+
+    @classmethod
+    def _install_verified_copy(cls, source: Path, target: Path) -> str:
+        """Install without overwriting a cache entry created by another process."""
+
+        created = False
+        try:
+            target_handle = target.open("xb")
+            created = True
+            with target_handle, source.open("rb") as source_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+        except FileExistsError:
+            if target.is_file() and not target.is_symlink() and cls._same_content(source, target):
+                return "reused"
+            return "conflict"
+        except BaseException:
+            if created:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        return "imported"
 
     @staticmethod
     def _same_content(left: Path, right: Path) -> bool:

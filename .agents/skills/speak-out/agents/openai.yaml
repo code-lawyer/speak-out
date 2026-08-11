@@ -1,0 +1,4 @@
+interface:
+  display_name: "Speak Out"
+  short_description: "Create, render, approve, and publish one content product"
+  default_prompt: "Use $speak-out to turn this article into approved website, WeChat, video, and social-platform publications."
