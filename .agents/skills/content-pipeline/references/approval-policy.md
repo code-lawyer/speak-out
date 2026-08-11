@@ -4,7 +4,7 @@
 
 Record distinct approval for:
 
-1. article revision;
+1. article revision, after showing both its website text and exact WeChat layout preview;
 2. WeChat cover revision;
 3. website and WeChat production publication;
 4. rendered video revision;

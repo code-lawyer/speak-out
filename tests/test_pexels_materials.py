@@ -102,3 +102,58 @@ def test_pexels_source_round_robins_across_search_terms(tmp_path):
         "law",
         "technology",
     ]
+
+
+def test_pexels_source_reuses_project_cache_across_products(tmp_path):
+    media_downloads = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal media_downloads
+        if request.url.host == "api.pexels.com":
+            return httpx.Response(
+                200,
+                json={
+                    "videos": [
+                        {
+                            "id": 4242,
+                            "duration": 12,
+                            "url": "https://www.pexels.com/video/4242/",
+                            "user": {"name": "Shared Creator"},
+                            "video_files": [
+                                {
+                                    "width": 1920,
+                                    "height": 1080,
+                                    "link": "https://cdn.example/4242.mp4",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                request=request,
+            )
+        media_downloads += 1
+        return httpx.Response(200, content=b"shared-video-bytes", request=request)
+
+    cache_root = tmp_path / ".local" / "media-cache"
+    source = PexelsMaterialSource(
+        api_key="pexels-secret",
+        cache_root=cache_root,
+        http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+
+    first = source.acquire(
+        terms=["law"],
+        destination=tmp_path / "product-a" / "materials",
+        max_files=1,
+    )
+    second = source.acquire(
+        terms=["law"],
+        destination=tmp_path / "product-b" / "materials",
+        max_files=1,
+    )
+
+    assert media_downloads == 1
+    assert first[0].path.read_bytes() == b"shared-video-bytes"
+    assert second[0].path.read_bytes() == b"shared-video-bytes"
+    assert first[0].path.samefile(second[0].path)
+    assert (cache_root / "pexels" / "4242-1920x1080.mp4").samefile(first[0].path)

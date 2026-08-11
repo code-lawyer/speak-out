@@ -47,8 +47,12 @@ from .state import (
 from .validation import (
     validate_article_documents,
     validate_png_cover,
+    validate_release_links,
+    validate_release_markers,
 )
+from .wechat import WeChatArticleRenderer, WeChatRenderError
 from .video.spec import VideoScriptSpec
+from .video.cache import ProjectMediaCache
 from .video.renderer import FfmpegExplainerRenderer
 from .video.workflow import VideoRenderRequest, VideoRenderWorkflow, VideoWorkflowError
 from .browser.cdp import CdpWebSocketClient, ChromePageController
@@ -136,6 +140,7 @@ artifact_app = typer.Typer(help="Add immutable Product artifact revisions.", no_
 article_app = typer.Typer(help="Preview and publish website/WeChat articles.", no_args_is_help=True)
 video_app = typer.Typer(help="Acquire materials and render landscape explainer videos.", no_args_is_help=True)
 social_app = typer.Typer(help="Approve and publish videos through visible local Chrome.", no_args_is_help=True)
+media_cache_app = typer.Typer(help="Inspect and seed the project-local media cache.", no_args_is_help=True)
 app.add_typer(product_app, name="product")
 app.add_typer(config_app, name="config")
 app.add_typer(approval_app, name="approval")
@@ -143,6 +148,49 @@ app.add_typer(artifact_app, name="artifact")
 app.add_typer(article_app, name="article")
 app.add_typer(video_app, name="video")
 app.add_typer(social_app, name="social")
+app.add_typer(media_cache_app, name="media-cache")
+
+
+@media_cache_app.command("status")
+def media_cache_status(
+    project_root: Annotated[Path, typer.Option(help="Project repository root.")] = Path("."),
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    status = ProjectMediaCache(
+        project_root.resolve() / ".local" / "media-cache"
+    ).status()
+    payload = {
+        "ok": True,
+        "root": str(status.root),
+        "files": status.files,
+        "bytes": status.bytes,
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+        return
+    typer.echo(f"Media cache: {status.files} files, {status.bytes} bytes at {status.root}")
+
+
+@media_cache_app.command("import-workspace")
+def import_workspace_media_cache(
+    project_root: Annotated[Path, typer.Option(help="Project repository root.")] = Path("."),
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    project_root = project_root.resolve()
+    result = ProjectMediaCache(
+        project_root / ".local" / "media-cache"
+    ).import_workspace(project_root / "workspace")
+    payload = {"ok": result.conflicts == 0, **result.model_dump()}
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+    else:
+        typer.echo(
+            "Media cache import: "
+            f"{result.imported} imported, {result.reused} reused, "
+            f"{result.conflicts} conflicts"
+        )
+    if result.conflicts:
+        raise typer.Exit(code=1)
 
 
 @app.command("doctor")
@@ -230,10 +278,20 @@ def preview_article(
         "cover": "ready",
         "duplicateSite": preview.duplicate_site,
     }
+    if bundle.wechat_layout_profile is not None:
+        payload["wechatLayoutProfile"] = bundle.wechat_layout_profile
+        payload["wechatPreviewPath"] = str(
+            product.root / "article" / article_revision / "index.html"
+        )
     if json_output:
         typer.echo(json.dumps(payload, ensure_ascii=False))
         return
     typer.echo(f"Article ready for site and WeChat draft: {preview.target_slug}")
+    if bundle.wechat_layout_profile is not None:
+        typer.echo(
+            "Review the exact WeChat layout before approval: "
+            + payload["wechatPreviewPath"]
+        )
     typer.echo("No network request was sent.")
 
 
@@ -996,16 +1054,50 @@ def record_approval(
 def add_article_revision(
     product_root: Annotated[Path, typer.Option("--product", help="Product directory.")],
     mdx: Annotated[Path, typer.Option(help="Final website MDX file.")],
-    body_html: Annotated[Path, typer.Option(help="Validated WeChat body HTML.")],
-    wechat_html: Annotated[Path, typer.Option(help="Complete WeChat HTML.")],
+    body_html: Annotated[
+        Path | None,
+        typer.Option(help="Optional canonical WeChat body HTML for verification."),
+    ] = None,
+    wechat_html: Annotated[
+        Path | None,
+        typer.Option(help="Optional canonical WeChat preview HTML for verification."),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
     mdx_bytes = mdx.read_bytes()
-    body_bytes = body_html.read_bytes()
-    wechat_bytes = wechat_html.read_bytes()
     mdx_text = mdx_bytes.decode("utf-8")
-    body_text = body_bytes.decode("utf-8")
-    wechat_text = wechat_bytes.decode("utf-8")
+    marker_issues = validate_release_markers(mdx_text)
+    if marker_issues:
+        raise typer.BadParameter("; ".join(marker_issues), param_hint="--mdx")
+    link_issues = validate_release_links(mdx_text)
+    if link_issues:
+        raise typer.BadParameter("; ".join(link_issues), param_hint="--mdx")
+    try:
+        rendered = WeChatArticleRenderer().render(mdx_text)
+    except (ValueError, WeChatRenderError) as error:
+        raise typer.BadParameter(str(error), param_hint="--mdx") from error
+    if (body_html is None) != (wechat_html is None):
+        raise typer.BadParameter(
+            "--body-html and --wechat-html must be supplied together",
+            param_hint="--body-html",
+        )
+    if body_html is not None and wechat_html is not None:
+        body_text = body_html.read_text(encoding="utf-8")
+        wechat_text = wechat_html.read_text(encoding="utf-8")
+        if (
+            body_text != rendered.body_html
+            or wechat_text != rendered.preview_html
+        ):
+            raise typer.BadParameter(
+                "manual WeChat HTML does not match the deterministic renderer; "
+                "omit --body-html and --wechat-html to generate it",
+                param_hint="--body-html",
+            )
+    else:
+        body_text = rendered.body_html
+        wechat_text = rendered.preview_html
+    body_bytes = body_text.encode("utf-8")
+    wechat_bytes = wechat_text.encode("utf-8")
     issues = validate_article_documents(mdx_text, body_text, wechat_text)
     if issues:
         raise typer.BadParameter("; ".join(issues), param_hint="--mdx")
@@ -1019,6 +1111,13 @@ def add_article_revision(
                 "article.mdx": mdx_bytes,
                 "body.html": body_bytes,
                 "index.html": wechat_bytes,
+                "wechat-layout.json": (
+                    json.dumps(
+                        {"schemaVersion": 1, "profile": rendered.profile},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8"),
             },
         ),
     )
@@ -1322,6 +1421,7 @@ def render_video(
             workspace=workspace,
             product=product,
             settings=settings,
+            media_cache_root=project_root.resolve() / ".local" / "media-cache",
         ).render(
             VideoRenderRequest(
                 script_revision=script_revision,

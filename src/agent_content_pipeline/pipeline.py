@@ -15,6 +15,7 @@ from .publishing.article import (
 from .state import ApprovalLedger, ApprovalScope, PublicationLedger, PublicationRecordState
 from .social.models import SocialPlatform
 from .validation import validate_article_bundle
+from .wechat import WeChatArticleRenderer, WeChatRenderError
 from .workspace import ArtifactIntegrityError, ArtifactKind, Product, ProductWorkspace
 
 
@@ -31,6 +32,7 @@ class ArticlePublicationBundle(BaseModel):
     body_html: str
     wechat_html: str
     cover_png: bytes
+    wechat_layout_profile: str | None = None
 
     def specification(
         self,
@@ -87,6 +89,30 @@ def load_article_publication_bundle(
             ("verified article bundle is incomplete or not UTF-8",)
         ) from error
     issues = validate_article_bundle(markdown, body_html, wechat_html, cover_png)
+    layout_profile: str | None = None
+    layout_bytes = article.files.get("wechat-layout.json")
+    if layout_bytes is not None:
+        try:
+            layout = json.loads(layout_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            issues = (*issues, "wechat-layout.json is invalid")
+        else:
+            if layout != {
+                "schemaVersion": 1,
+                "profile": WeChatArticleRenderer.PROFILE,
+            }:
+                issues = (*issues, "wechat-layout.json uses an unsupported profile")
+            else:
+                layout_profile = WeChatArticleRenderer.PROFILE
+            try:
+                canonical = WeChatArticleRenderer().render(markdown)
+            except (ValueError, WeChatRenderError) as error:
+                issues = (*issues, f"deterministic WeChat rendering failed: {error}")
+            else:
+                if body_html != canonical.body_html:
+                    issues = (*issues, "body.html does not match deterministic WeChat layout")
+                if wechat_html != canonical.preview_html:
+                    issues = (*issues, "index.html does not match deterministic WeChat layout")
     if issues:
         raise ArticleValidationError(issues)
     return ArticlePublicationBundle(
@@ -97,6 +123,7 @@ def load_article_publication_bundle(
         markdown=markdown,
         body_html=body_html,
         wechat_html=wechat_html,
+        wechat_layout_profile=layout_profile,
         cover_png=cover_png,
     )
 

@@ -59,12 +59,8 @@ def test_cli_adds_one_immutable_article_revision(tmp_path):
     source = tmp_path / "incoming"
     source.mkdir()
     mdx = source / "article.mdx"
-    body = source / "body.html"
-    wechat = source / "index.html"
-    mdx_text, body_text, wechat_text = valid_article_files()
+    mdx_text, _, _ = valid_article_files()
     mdx.write_text(mdx_text, encoding="utf-8")
-    body.write_text(body_text, encoding="utf-8")
-    wechat.write_text(wechat_text, encoding="utf-8")
 
     result = CliRunner().invoke(
         app,
@@ -75,10 +71,6 @@ def test_cli_adds_one_immutable_article_revision(tmp_path):
             str(product.root),
             "--mdx",
             str(mdx),
-            "--body-html",
-            str(body),
-            "--wechat-html",
-            str(wechat),
             "--json",
         ],
     )
@@ -95,8 +87,58 @@ def test_cli_adds_one_immutable_article_revision(tmp_path):
         },
     }
     assert (revision_root / "article.mdx").read_text(encoding="utf-8").endswith("正文\n")
-    assert (revision_root / "body.html").read_text(encoding="utf-8") == body_text
+    assert "font-size:21px" in (revision_root / "body.html").read_text(encoding="utf-8")
     assert (revision_root / "index.html").is_file()
+    assert (revision_root / "wechat-layout.json").is_file()
+
+
+def test_cli_generates_and_seals_the_wechat_layout_from_mdx(tmp_path):
+    product = ProductWorkspace(tmp_path / "workspace").create(
+        ProductCreateRequest(
+            title="确定性排版",
+            slug="deterministic-wechat-layout",
+            created_on=date(2026, 8, 11),
+        )
+    )
+    mdx = tmp_path / "article.mdx"
+    mdx.write_text(
+        """---
+title: "斩我斋：确定性排版"
+date: 2026-08-11
+category: essay
+tags: ["AI"]
+summary: "排版摘要"
+---
+
+开场正文。
+
+## 第一部分
+
+章节正文。
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "artifact",
+            "add-article",
+            "--product",
+            str(product.root),
+            "--mdx",
+            str(mdx),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    revision_root = product.root / "article" / "v001"
+    body = (revision_root / "body.html").read_text(encoding="utf-8")
+    layout = json.loads((revision_root / "wechat-layout.json").read_text("utf-8"))
+    assert "border-left:3px solid #37475a" in body
+    assert body in (revision_root / "index.html").read_text(encoding="utf-8")
+    assert layout == {"schemaVersion": 1, "profile": "wechat-editorial-v1"}
 
 
 def test_cli_adds_a_landscape_png_cover_revision(tmp_path):

@@ -8,7 +8,8 @@ Store all files for one content Product inside `workspace/<date>-<slug>/`. Do no
 
 - Source notes under `source/`.
 - Website MDX with valid frontmatter under `article/<revision>/`.
-- WeChat body and complete HTML under the same article revision.
+- Deterministically generated WeChat `body.html`, `index.html`, and
+  `wechat-layout.json` under the same article revision.
 - Approved landscape PNG cover under `cover/<revision>/`.
 
 The public release article must not contain internal labels such as “原始记录”, “原文出处”, “研究笔记”, or “供参考”. Do not include external links unless the user explicitly approves links for that article.
@@ -16,12 +17,19 @@ The public release article must not contain internal labels such as “原始记
 Store those raw notes and sources in an immutable `source/vNNN` revision instead. Every artifact revision includes a generated `.artifact.json`; do not edit it or any sealed file.
 
 The WeChat body contains text paragraphs only. Do not add inline article images.
+Generate it with `acp artifact add-article --mdx ...`; do not hand-author or
+silently restyle it. The `wechat-editorial-v1` profile renders headings as
+numbered editorial sections and applies fixed inline styles for title, date,
+body, quotes, lists, and emphasis.
 
 ## Required video artifacts
 
 - Spoken narration script under `video/script/<revision>/`.
 - Search terms as `materialTerms` beside the complete `narration` in `script.json`.
-- Downloaded or local materials under `video/materials/<revision>/` or a render revision's `materials/` directory.
+- Downloaded or local materials under `video/materials/<revision>/` or a render
+  revision's `materials/` directory. Pexels files may be immutable hard links
+  to `.local/media-cache/pexels/`; the Product still retains `materials.json`
+  attribution and exact sealed bytes.
 - Narration, subtitle, and optional BGM intermediates under their named directories.
 - Final shared 1920x1080 MP4 under `video/renders/<revision>/`.
 - Platform copy bundle under `publish/copy/<revision>/copy.json`.

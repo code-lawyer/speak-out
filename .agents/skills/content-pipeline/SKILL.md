@@ -26,7 +26,12 @@ Read [content-contract.md](references/content-contract.md) before creating artic
 - Turn the user's source material into a finalized Chinese opinion or educational article.
 - Save raw notes and inputs with `acp artifact add-source`; keep them out of release article files.
 - Do not place research notes, raw-source links, or editorial annotations in the release article unless the user explicitly requests them.
-- Create WeChat HTML without inline illustrations.
+- Add the finalized MDX with `acp artifact add-article --mdx ...`; omit
+  `--body-html` and `--wechat-html`. The CLI must generate the deterministic
+  `wechat-editorial-v1` body and preview. Never hand-author release WeChat HTML.
+- Open the returned article revision's `index.html` and show the exact WeChat
+  layout before recording article approval. Article approval covers both the
+  website MDX and the hash-bound WeChat layout in that revision.
 - Generate exactly one separately approved landscape WeChat cover using the Agent's available image tool, or accept a user-provided cover.
 - Derive one 16:9 explainer-video narration script and material terms from the approved article. Preserve facts and thesis; adapt for speech instead of reading formatting artifacts aloud.
 - Save the video input as JSON with `schemaVersion`, complete `narration`, and one or more English `materialTerms`. The core does not generate missing prose.
@@ -34,7 +39,10 @@ Read [content-contract.md](references/content-contract.md) before creating artic
 
 ### Confirm the written branch
 
-Show the final article and cover separately. Record approval only after the user explicitly confirms the article, cover, and production publication. Dry-run first.
+Show the final article, exact WeChat `index.html` preview, and cover separately.
+Record article approval only after the user explicitly confirms both the text
+and that exact WeChat layout. Record cover and production publication approval
+separately. Dry-run first.
 
 After approval, allow the website/WeChat publication branch and video-rendering branch to proceed independently. Do not roll back or repeat a successful article publication because video rendering fails.
 
@@ -58,6 +66,14 @@ For long Pexels-backed videos, prefer `--material-count 24` (maximum 36) and let
 the acquisition adapter distribute clips across every approved material term.
 Never replace a requested Pexels run with cached local footage without explicit
 user approval.
+
+Pexels downloads use the project-local immutable cache under
+`.local/media-cache/pexels/`. A cache hit reuses the exact Pexels asset bytes by
+hard link when possible; it is not a local-material substitution and does not
+remove the need for `--allow-pexels-data-transfer`, because search terms still
+go to Pexels. Run `acp media-cache import-workspace --project-root .` once to
+seed the cache from existing Products, and `acp media-cache status` to inspect
+logical cache size without reading secret values.
 
 Pass `--allow-edge-tts-data-transfer` only after the user explicitly accepts that exact narration transfer. Pass `--allow-pexels-data-transfer` only after the user accepts that exact material-term transfer. For private narration, provide both local `--narration-audio` and `--subtitles`; this bypasses Edge TTS. Run `acp video inspect` on the finished revision, show the exact MP4, then record video approval.
 

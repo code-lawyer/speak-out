@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any, Sequence
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +23,7 @@ class DownloadedMaterial(BaseModel):
     source_url: str
     creator: str | None = None
     search_term: str
+    cache_hit: bool = False
 
 
 class MaterialAcquisitionError(RuntimeError):
@@ -32,12 +36,14 @@ class PexelsMaterialSource:
     def __init__(
         self,
         api_key: str,
+        cache_root: Path | None = None,
         http_client: httpx.Client | None = None,
         timeout_seconds: float = 60,
     ) -> None:
         if not api_key:
             raise ValueError("Pexels API key is required")
         self._api_key = api_key
+        self._cache_root = cache_root.resolve() if cache_root is not None else None
         self._http_client = http_client
         self._timeout_seconds = timeout_seconds
 
@@ -76,26 +82,22 @@ class PexelsMaterialSource:
                     video = videos.pop(0)
                     asset_id = str(video.get("id", ""))
                     duration = float(video.get("duration", 0))
-                    if not asset_id or asset_id in seen_ids or duration < minimum_duration:
+                    if (
+                        not asset_id.isdigit()
+                        or asset_id in seen_ids
+                        or duration < minimum_duration
+                    ):
                         continue
                     rendition = self._best_landscape_rendition(video.get("video_files", []))
                     if rendition is None:
                         continue
                     output_path = destination / f"pexels-{asset_id}.mp4"
-                    with client.stream(
-                        "GET",
-                        str(rendition["link"]),
-                        timeout=self._timeout_seconds,
-                    ) as media_response:
-                        media_response.raise_for_status()
-                        with output_path.open("xb") as output:
-                            for chunk in media_response.iter_bytes():
-                                output.write(chunk)
-                    if output_path.stat().st_size <= 0:
-                        output_path.unlink(missing_ok=True)
-                        raise MaterialAcquisitionError(
-                            f"Pexels returned an empty file for asset {asset_id}"
-                        )
+                    cache_hit = self._materialize(
+                        client=client,
+                        asset_id=asset_id,
+                        rendition=rendition,
+                        output_path=output_path,
+                    )
                     downloads.append(
                         DownloadedMaterial(
                             path=output_path,
@@ -106,6 +108,7 @@ class PexelsMaterialSource:
                             source_url=str(video.get("url", "")),
                             creator=(video.get("user") or {}).get("name"),
                             search_term=term,
+                            cache_hit=cache_hit,
                         )
                     )
                     seen_ids.add(asset_id)
@@ -119,6 +122,66 @@ class PexelsMaterialSource:
         if not downloads:
             raise MaterialAcquisitionError("Pexels returned no usable landscape video materials")
         return downloads
+
+    def _materialize(
+        self,
+        *,
+        client: httpx.Client,
+        asset_id: str,
+        rendition: dict[str, Any],
+        output_path: Path,
+    ) -> bool:
+        if self._cache_root is None:
+            self._download(client, str(rendition["link"]), output_path, asset_id)
+            return False
+
+        cache_directory = self._cache_root / "pexels"
+        cache_directory.mkdir(parents=True, exist_ok=True)
+        width = int(rendition["width"])
+        height = int(rendition["height"])
+        cache_path = cache_directory / f"{asset_id}-{width}x{height}.mp4"
+        cache_hit = cache_path.is_file() and cache_path.stat().st_size > 0
+        if not cache_hit:
+            cache_path.unlink(missing_ok=True)
+            temporary = cache_directory / f".{cache_path.name}.{uuid4().hex}.part"
+            try:
+                self._download(client, str(rendition["link"]), temporary, asset_id)
+                try:
+                    os.link(temporary, cache_path)
+                except FileExistsError:
+                    pass
+                except OSError:
+                    if not cache_path.exists():
+                        os.replace(temporary, cache_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        try:
+            os.link(cache_path, output_path)
+        except OSError:
+            shutil.copy2(cache_path, output_path)
+        return cache_hit
+
+    def _download(
+        self,
+        client: httpx.Client,
+        url: str,
+        output_path: Path,
+        asset_id: str,
+    ) -> None:
+        with client.stream(
+            "GET",
+            url,
+            timeout=self._timeout_seconds,
+        ) as media_response:
+            media_response.raise_for_status()
+            with output_path.open("xb") as output:
+                for chunk in media_response.iter_bytes():
+                    output.write(chunk)
+        if output_path.stat().st_size <= 0:
+            output_path.unlink(missing_ok=True)
+            raise MaterialAcquisitionError(
+                f"Pexels returned an empty file for asset {asset_id}"
+            )
 
     @staticmethod
     def _best_landscape_rendition(video_files: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
@@ -152,6 +215,7 @@ class PexelsMaterialSource:
                 "sourceUrl": item.source_url,
                 "creator": item.creator,
                 "searchTerm": item.search_term,
+                "cacheHit": item.cache_hit,
             }
             for item in downloads
         ]

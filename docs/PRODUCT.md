@@ -49,6 +49,8 @@ The first priority is preserving and extending the maintainer's working producti
 - Produce one 16:9 landscape video shared by all three video platforms.
 - Default resolution and codec: 1920x1080 H.264 video in an MP4 container.
 - Default materials: Pexels plus optional local assets.
+- Reuse identical Pexels asset renditions from the project-local immutable cache
+  while retaining Product-local paths and attribution manifests.
 - Default narration: Edge TTS `zh-CN-YunxiNeural`.
 - Generate subtitles and optionally mix a random track from the local BGM library.
 - The first release excludes avatars, lip sync, generative-video models, and a timeline editor.
@@ -66,6 +68,7 @@ The first priority is preserving and extending the maintainer's working producti
 
 - Store all user-editable secrets in `.local/secrets.toml` as plaintext by explicit user choice.
 - Store Chrome profiles under `.local/browser-profiles/`.
+- Store reusable public stock-video bytes under `.local/media-cache/`.
 - Store each Product under `workspace/<date>-<slug>/`.
 - Ignore `.local/` and `workspace/` in Git and redact secrets from every log.
 - Approved artifact revisions are immutable; new work creates a new revision.

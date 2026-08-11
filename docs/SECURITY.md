@@ -26,6 +26,17 @@ The CLI requires `--allow-edge-tts-data-transfer` before constructing the online
 
 Article publication sends one manifest-verified snapshot of the approved MDX, WeChat HTML, and cover to the configured VPS. Social publication reads copy from a verified snapshot and exposes a private, manifest-bound MP4 copy only to the selected creator page in visible Chrome; the temporary copy stays inside the Product and is removed after the attempt.
 
+New WeChat layouts are deterministic and hash-bound to the article revision.
+Immediately before publication, the Pipeline regenerates the canonical layout
+from the verified MDX bytes and rejects body or preview drift. Exact article
+approval therefore covers both written content and the displayed WeChat layout.
+
+The Pexels cache contains public stock-video bytes and attribution metadata
+only; it never contains credentials, authorization headers, narration, cookies,
+or private drafts. Cache files are immutable. Product hard links may outlive the
+cache directory entry, so removing a cache entry does not invalidate sealed
+Product bytes.
+
 Video rendering likewise uses the exact verified `script.json` bytes and a streamed Product-local snapshot of sealed local materials. Approved scripts and materials are never verified by path and then re-read from the mutable source path for TTS or FFmpeg.
 
 Every artifact revision is sealed with a local SHA-256 manifest. Artifact and publication approvals retain the associated content digest. A missing or changed file blocks later approval or execution. Legacy revisions require an explicit seal operation and must then be approved normally. A valid legacy hash is not treated as content validity: the exact MDX, WeChat body/full HTML, and PNG bytes are revalidated before preview, publication approval, preflight, and execution.

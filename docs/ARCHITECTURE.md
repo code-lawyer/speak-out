@@ -46,6 +46,19 @@ Accept an approved video specification and produce inspected output artifacts. T
 
 `VideoRenderWorkflow` is the application boundary above those Adapters. It reads the approved script as one verified byte snapshot, streams a sealed local-material revision into a private Product-local snapshot, copies local narration and BGM into staging, and renders only from those stable inputs. Success commits the whole staging tree as a revision; every exceptional exit removes the incomplete staging tree.
 
+`ProjectMediaCache` owns reusable Pexels bytes under `.local/media-cache/`.
+`PexelsMaterialSource` still searches every approved term on each acknowledged
+remote run, but downloads an asset rendition only when its project cache key is
+absent. Product render revisions receive immutable hard links when supported
+and copies otherwise, preserving Product-local paths without unnecessary
+physical duplication.
+
+`WeChatArticleRenderer` owns the deterministic `wechat-editorial-v1` layout.
+New article revisions are constructed from MDX through this Module and carry a
+layout marker. The Pipeline re-renders from the verified MDX snapshot and
+requires exact body and preview bytes before publication. Legacy revisions
+without a marker retain the proven compatibility validator.
+
 ### BrowserDriver
 
 Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction, upload, download, and user-intervention primitives. The default Adapter uses local Chrome 116+ and CDP, retries transient probes before declaring an existing Profile stale, cleans up a newly launched process on failure or user interruption, and can explicitly close only that dedicated session.

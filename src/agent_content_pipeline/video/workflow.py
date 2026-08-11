@@ -102,6 +102,7 @@ class VideoRenderWorkflow:
         approval_ledger: ApprovalReader | None = None,
         narrator: Narrator | None = None,
         material_source: MaterialSource | None = None,
+        media_cache_root: Path | None = None,
         renderer: Renderer | None = None,
     ) -> None:
         self._workspace = workspace
@@ -110,6 +111,7 @@ class VideoRenderWorkflow:
         self._approval_ledger = approval_ledger or ApprovalLedger(product.root)
         self._narrator = narrator
         self._material_source = material_source
+        self._media_cache_root = media_cache_root
         self._renderer = renderer or FfmpegExplainerRenderer()
 
     def render(self, request: VideoRenderRequest) -> VideoWorkflowResult:
@@ -240,7 +242,10 @@ class VideoRenderWorkflow:
                     "Pexels API key is missing; edit .local/secrets.toml or pass "
                     "--material-revision"
                 )
-            source = PexelsMaterialSource(api_key=api_key)
+            source = PexelsMaterialSource(
+                api_key=api_key,
+                cache_root=self._media_cache_root,
+            )
         downloads = source.acquire(
             terms=spec.material_terms,
             destination=staging / "materials",
