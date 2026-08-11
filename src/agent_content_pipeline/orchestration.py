@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .state import PublicationLedger, PublicationRecordState, StageAttemptLedger, StageState
 from .security import redact_sensitive_data
+from .stages import PipelineStage
 
 
 class StageCommand(BaseModel):
@@ -330,18 +331,17 @@ class PipelineOrchestrator:
         idempotency_key: str,
         outcome: ReconciliationOutcome,
     ) -> None:
-        if stage == "article":
-            destination = "website-wechat"
-            succeeded_state = "succeeded"
-        elif stage.startswith("social:"):
-            destination = stage
-            succeeded_state = "submitted"
-        else:
+        try:
+            route = PipelineStage(stage).publication_route
+        except ValueError:
+            route = None
+        if route is None:
             return
+        destination, succeeded_state = route
         state = (
             PublicationRecordState.FAILED
             if outcome == ReconciliationOutcome.ABSENT
-            else PublicationRecordState(succeeded_state)
+            else succeeded_state
         )
         PublicationLedger(self._ledger.state_path.parent).record_state(
             destination,

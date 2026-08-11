@@ -315,6 +315,7 @@ request_timeout_seconds = 30
                 "success": True,
                 "wechatPushed": True,
                 "url": "/articles/publish-test",
+                "message": "accepted with publish-secret",
                 "accessToken": "remote-secret-token",
                 "setCookie": "private-session-cookie",
             },

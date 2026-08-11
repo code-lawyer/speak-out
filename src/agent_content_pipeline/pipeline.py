@@ -4,6 +4,8 @@ import hashlib
 import json
 from typing import Protocol
 
+from pydantic import BaseModel, ConfigDict
+
 from .publishing.article import (
     ArticleValidationError,
     ArticlePublicationSpec,
@@ -13,7 +15,90 @@ from .publishing.article import (
 from .state import ApprovalLedger, ApprovalScope, PublicationLedger, PublicationRecordState
 from .social.models import SocialPlatform
 from .validation import validate_article_bundle
-from .workspace import ArtifactKind, Product, ProductWorkspace
+from .workspace import ArtifactIntegrityError, ArtifactKind, Product, ProductWorkspace
+
+
+class ArticlePublicationBundle(BaseModel):
+    """One manifest-verified immutable article/cover byte snapshot."""
+
+    model_config = ConfigDict(frozen=True)
+
+    article_revision: str
+    cover_revision: str
+    article_digest: str
+    cover_digest: str
+    markdown: str
+    body_html: str
+    wechat_html: str
+    cover_png: bytes
+
+    def specification(
+        self,
+        *,
+        source_slug: str,
+        target_slug: str,
+        push_to_wechat: bool = True,
+    ) -> ArticlePublicationSpec:
+        return ArticlePublicationSpec(
+            markdown=self.markdown,
+            source_slug=source_slug,
+            target_slug=target_slug,
+            wechat_html=self.wechat_html,
+            cover_png=self.cover_png,
+            push_to_wechat=push_to_wechat,
+        )
+
+
+def load_article_publication_bundle(
+    workspace: ProductWorkspace,
+    product: Product,
+    article_revision: str,
+    cover_revision: str,
+) -> ArticlePublicationBundle:
+    integrity_issues: list[str] = []
+    article = None
+    cover = None
+    try:
+        article = workspace.read_verified_revision(
+            product,
+            ArtifactKind.ARTICLE,
+            article_revision,
+        )
+    except ArtifactIntegrityError as error:
+        integrity_issues.extend(error.issues)
+    try:
+        cover = workspace.read_verified_revision(
+            product,
+            ArtifactKind.COVER,
+            cover_revision,
+        )
+    except ArtifactIntegrityError as error:
+        integrity_issues.extend(error.issues)
+    if integrity_issues:
+        raise ArtifactIntegrityError(tuple(integrity_issues))
+    assert article is not None and cover is not None
+    try:
+        markdown = article.files["article.mdx"].decode("utf-8")
+        body_html = article.files["body.html"].decode("utf-8")
+        wechat_html = article.files["index.html"].decode("utf-8")
+        cover_png = cover.files["cover.png"]
+    except (KeyError, UnicodeError) as error:
+        raise ArticleValidationError(
+            ("verified article bundle is incomplete or not UTF-8",)
+        ) from error
+    issues = validate_article_bundle(markdown, body_html, wechat_html, cover_png)
+    if issues:
+        raise ArticleValidationError(issues)
+    return ArticlePublicationBundle(
+        article_revision=article_revision,
+        cover_revision=cover_revision,
+        article_digest=article.digest,
+        cover_digest=cover.digest,
+        markdown=markdown,
+        body_html=body_html,
+        wechat_html=wechat_html,
+        cover_png=cover_png,
+    )
 
 
 class ArticlePublisher(Protocol):
@@ -121,40 +206,16 @@ class ArticlePublicationWorkflow:
         target_slug: str | None = None,
         push_to_wechat: bool = True,
     ) -> ArticlePublishResult:
-        article = self._workspace.read_verified_revision(
+        bundle = load_article_publication_bundle(
+            self._workspace,
             self._product,
-            ArtifactKind.ARTICLE,
             article_revision,
-        )
-        cover = self._workspace.read_verified_revision(
-            self._product,
-            ArtifactKind.COVER,
             cover_revision,
         )
-        try:
-            markdown = article.files["article.mdx"].decode("utf-8")
-            body_html = article.files["body.html"].decode("utf-8")
-            wechat_html = article.files["index.html"].decode("utf-8")
-            cover_png = cover.files["cover.png"]
-        except (KeyError, UnicodeError) as error:
-            raise ArticleValidationError(
-                ("verified article bundle is incomplete or not UTF-8",)
-            ) from error
-        validation_issues = validate_article_bundle(
-            markdown,
-            body_html,
-            wechat_html,
-            cover_png,
-        )
-        if validation_issues:
-            raise ArticleValidationError(validation_issues)
         destination_slug = target_slug or self._product.manifest.slug
-        spec = ArticlePublicationSpec(
-            markdown=markdown,
+        spec = bundle.specification(
             source_slug=self._product.manifest.slug,
             target_slug=destination_slug,
-            wechat_html=wechat_html,
-            cover_png=cover_png,
             push_to_wechat=push_to_wechat,
         )
         publication_key = article_publication_approval_key(
@@ -164,14 +225,14 @@ class ArticlePublicationWorkflow:
             spec.push_to_wechat,
         )
         publication_digest = article_publication_content_digest(
-            article.digest,
-            cover.digest,
+            bundle.article_digest,
+            bundle.cover_digest,
             spec.target_slug,
             spec.push_to_wechat,
         )
         requirements = (
-            (ApprovalScope.ARTICLE, article_revision, article.digest),
-            (ApprovalScope.COVER, cover_revision, cover.digest),
+            (ApprovalScope.ARTICLE, article_revision, bundle.article_digest),
+            (ApprovalScope.COVER, cover_revision, bundle.cover_digest),
             (ApprovalScope.ARTICLE_PUBLICATION, publication_key, publication_digest),
         )
         missing = tuple(

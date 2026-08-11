@@ -5,11 +5,12 @@ import json
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..config import validate_website_wechat_credentials
 from ..security import redact_sensitive_data
 
 
@@ -82,6 +83,8 @@ def write_article_publish_log(
     preview: ArticlePublishPreview,
     result: ArticlePublishResult,
     channels: ArticleChannelReport,
+    *,
+    secret_values: Iterable[str] = (),
 ) -> Path:
     log_root = product_root / "logs"
     log_root.mkdir(parents=True, exist_ok=True)
@@ -100,7 +103,10 @@ def write_article_publish_log(
         "site": channels.site,
         "cover": channels.cover,
         "wechat": channels.wechat,
-        "response": redact_publication_data(result.response),
+        "response": redact_publication_data(
+            result.response,
+            secret_values=secret_values,
+        ),
         "error": result.error,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -123,8 +129,10 @@ class FixedIpVpsPublisher:
         http_client: httpx.Client | None = None,
         timeout_seconds: float = 30,
     ) -> None:
-        self.endpoint = endpoint
-        self._bearer_token = bearer_token
+        self.endpoint, self._bearer_token = validate_website_wechat_credentials(
+            endpoint,
+            bearer_token,
+        )
         self._http_client = http_client
         self._timeout_seconds = timeout_seconds
 
@@ -191,6 +199,10 @@ class FixedIpVpsPublisher:
             state = PublicationState.PARTIAL
         else:
             state = PublicationState.UNKNOWN
+        response_body = redact_publication_data(
+            response_body,
+            secret_values=(self._bearer_token,),
+        )
         return ArticlePublishResult(
             state=state,
             http_status=response.status_code,

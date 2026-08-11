@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import json
 import hashlib
-import random
-import shutil
 import sys
 import time
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Annotated
-from uuid import uuid4
 
 import typer
 from pydantic import ValidationError
@@ -17,14 +14,16 @@ from pydantic import ValidationError
 from .config import LocalConfig
 from .diagnostics import SystemDoctor
 from .pipeline import (
+    ArticlePublicationBundle,
     ArticlePublicationWorkflow,
     article_publication_content_digest,
     article_publication_approval_key,
+    load_article_publication_bundle,
     social_publication_content_digest,
     social_publication_approval_key,
 )
 from .publishing.article import (
-    ArticlePublicationSpec,
+    ArticleValidationError,
     FixedIpVpsPublisher,
     PublicationState,
     interpret_article_result,
@@ -42,19 +41,16 @@ from .state import (
     ApprovalLedger,
     ApprovalScope,
     PublicationLedger,
-    PublicationRecordState,
     StageAttemptLedger,
     StageState,
 )
 from .validation import (
-    validate_article_bundle,
     validate_article_documents,
     validate_png_cover,
 )
 from .video.spec import VideoScriptSpec
-from .video.materials import PexelsMaterialSource
-from .video.narration import EdgeTtsNarrator, NarrationResult
 from .video.renderer import FfmpegExplainerRenderer
+from .video.workflow import VideoRenderRequest, VideoRenderWorkflow, VideoWorkflowError
 from .browser.cdp import CdpWebSocketClient, ChromePageController
 from .browser.chrome import LocalChromeCdpDriver
 from .social.browser_publishers import CONTRACTS, VisibleChromePlatformPublisher
@@ -63,8 +59,13 @@ from .social.models import (
     SocialPlatform,
     SocialPostSpec,
     SocialPublicationState,
-    SocialPublishResult,
 )
+from .social.workflow import (
+    SocialPublicationRequest,
+    SocialPublicationWorkflow,
+    SocialPublicationWorkflowError,
+)
+from .stages import PipelineStage
 from .workspace import (
     ArtifactKind,
     ArtifactIntegrityError,
@@ -106,46 +107,21 @@ def _verified_snapshot(
         raise typer.BadParameter(str(error), param_hint="--revision") from error
 
 
-def _remove_private_snapshot(
-    path: Path,
-    *,
-    attempts: int = 5,
-    delay_seconds: float = 0.2,
-) -> str | None:
-    """Remove a browser-upload snapshot, recording a safe later retry if Windows holds it."""
-
-    marker = path.with_suffix(path.suffix + ".cleanup-pending")
-    last_error: OSError | None = None
-    for attempt in range(max(1, attempts)):
-        try:
-            path.unlink(missing_ok=True)
-            marker.unlink(missing_ok=True)
-            return None
-        except OSError as error:
-            last_error = error
-            if attempt + 1 < max(1, attempts):
-                time.sleep(max(0, delay_seconds))
-    warning = f"private upload snapshot cleanup is pending: {path} ({last_error})"
+def _verified_article_bundle(
+    workspace: ProductWorkspace,
+    product: Product,
+    article_revision: str,
+    cover_revision: str,
+) -> ArticlePublicationBundle:
     try:
-        marker.write_text(path.name + "\n", encoding="utf-8")
-    except OSError as marker_error:
-        warning += f"; cleanup marker could not be written ({marker_error})"
-    return warning
-
-
-def _sweep_private_snapshots(
-    staging_root: Path,
-    *,
-    delay_seconds: float = 0.2,
-) -> tuple[str, ...]:
-    warnings: list[str] = []
-    for marker in sorted(staging_root.glob("*.cleanup-pending")):
-        suffix = ".cleanup-pending"
-        target = Path(str(marker)[: -len(suffix)])
-        warning = _remove_private_snapshot(target, delay_seconds=delay_seconds)
-        if warning is not None:
-            warnings.append(warning)
-    return tuple(warnings)
+        return load_article_publication_bundle(
+            workspace,
+            product,
+            article_revision,
+            cover_revision,
+        )
+    except (ArtifactIntegrityError, ArticleValidationError) as error:
+        raise typer.BadParameter(str(error), param_hint="--article-revision") from error
 
 
 app = typer.Typer(
@@ -223,32 +199,24 @@ def preview_article(
 ) -> None:
     workspace = ProductWorkspace(product_root.parent)
     product = workspace.load(product_root)
-    _verified_artifact(workspace, product, ArtifactKind.ARTICLE, article_revision)
-    _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
-    article_root = product.root / "article" / article_revision
-    cover_root = product.root / "cover" / cover_revision
-    markdown = (article_root / "article.mdx").read_text(encoding="utf-8")
-    body_html = (article_root / "body.html").read_text(encoding="utf-8")
-    wechat_html = (article_root / "index.html").read_text(encoding="utf-8")
-    cover_png = (cover_root / "cover.png").read_bytes()
-    issues = validate_article_bundle(markdown, body_html, wechat_html, cover_png)
-    if issues:
-        raise typer.BadParameter("; ".join(issues), param_hint="--article-revision")
+    bundle = _verified_article_bundle(
+        workspace,
+        product,
+        article_revision,
+        cover_revision,
+    )
 
     website = LocalConfig(project_root).load().website_wechat
+    website_token = website.bearer_token.get_secret_value()
     publisher = FixedIpVpsPublisher(
         endpoint=website.endpoint,
-        bearer_token=website.bearer_token.get_secret_value(),
+        bearer_token=website_token,
         timeout_seconds=website.request_timeout_seconds,
     )
     preview = publisher.preview(
-        ArticlePublicationSpec(
-            markdown=markdown,
+        bundle.specification(
             source_slug=product.manifest.slug,
             target_slug=product.manifest.slug,
-            wechat_html=wechat_html,
-            cover_png=cover_png,
-            push_to_wechat=True,
         )
     )
     payload = {
@@ -295,29 +263,17 @@ def approve_article_publication(
         raise typer.BadParameter("explicit --confirmed-by-user is required")
     workspace = ProductWorkspace(product_root.parent)
     product = workspace.load(product_root)
-    article = _verified_artifact(
+    bundle = _verified_article_bundle(
         workspace,
         product,
-        ArtifactKind.ARTICLE,
         article_revision,
+        cover_revision,
     )
-    cover = _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
-    validation_issues = validate_article_bundle(
-        (article.root / "article.mdx").read_text(encoding="utf-8"),
-        (article.root / "body.html").read_text(encoding="utf-8"),
-        (article.root / "index.html").read_text(encoding="utf-8"),
-        (cover.root / "cover.png").read_bytes(),
-    )
-    if validation_issues:
-        raise typer.BadParameter(
-            "; ".join(validation_issues),
-            param_hint="--article-revision",
-        )
     approvals = ApprovalLedger(product.root)
     missing_artifact_approvals = []
-    if not approvals.has(ApprovalScope.ARTICLE, article_revision, article.digest):
+    if not approvals.has(ApprovalScope.ARTICLE, article_revision, bundle.article_digest):
         missing_artifact_approvals.append(f"article:{article_revision}")
-    if not approvals.has(ApprovalScope.COVER, cover_revision, cover.digest):
+    if not approvals.has(ApprovalScope.COVER, cover_revision, bundle.cover_digest):
         missing_artifact_approvals.append(f"cover:{cover_revision}")
     if missing_artifact_approvals:
         raise typer.BadParameter(
@@ -336,8 +292,8 @@ def approve_article_publication(
         True,
     )
     publication_digest = article_publication_content_digest(
-        article.digest,
-        cover.digest,
+        bundle.article_digest,
+        bundle.cover_digest,
         destination_slug,
         True,
     )
@@ -388,34 +344,21 @@ def publish_article(
             "explicit --allow-duplicate-site is required"
         )
 
-    article = _verified_artifact(
+    bundle = _verified_article_bundle(
         workspace,
         product,
-        ArtifactKind.ARTICLE,
         article_revision,
+        cover_revision,
     )
-    cover = _verified_artifact(workspace, product, ArtifactKind.COVER, cover_revision)
-    article_root = article.root
-    cover_root = cover.root
-    markdown = (article_root / "article.mdx").read_text(encoding="utf-8")
-    body_html = (article_root / "body.html").read_text(encoding="utf-8")
-    wechat_html = (article_root / "index.html").read_text(encoding="utf-8")
-    cover_png = (cover_root / "cover.png").read_bytes()
-    issues = validate_article_bundle(markdown, body_html, wechat_html, cover_png)
-    if issues:
-        raise typer.BadParameter("; ".join(issues), param_hint="--article-revision")
-    spec = ArticlePublicationSpec(
-        markdown=markdown,
+    spec = bundle.specification(
         source_slug=product.manifest.slug,
         target_slug=destination_slug,
-        wechat_html=wechat_html,
-        cover_png=cover_png,
-        push_to_wechat=True,
     )
     website = LocalConfig(project_root).load().website_wechat
+    website_token = website.bearer_token.get_secret_value()
     publisher = FixedIpVpsPublisher(
         endpoint=website.endpoint,
-        bearer_token=website.bearer_token.get_secret_value(),
+        bearer_token=website_token,
         timeout_seconds=website.request_timeout_seconds,
     )
     preview = publisher.preview(spec)
@@ -426,8 +369,8 @@ def publish_article(
         True,
     )
     publication_digest = article_publication_content_digest(
-        article.digest,
-        cover.digest,
+        bundle.article_digest,
+        bundle.cover_digest,
         destination_slug,
         True,
     )
@@ -436,8 +379,8 @@ def publish_article(
         missing = [
             f"{scope.value}:{revision}"
             for scope, revision, digest in (
-                (ApprovalScope.ARTICLE, article_revision, article.digest),
-                (ApprovalScope.COVER, cover_revision, cover.digest),
+                (ApprovalScope.ARTICLE, article_revision, bundle.article_digest),
+                (ApprovalScope.COVER, cover_revision, bundle.cover_digest),
                 (ApprovalScope.ARTICLE_PUBLICATION, key, publication_digest),
             )
             if not approvals.has(scope, revision, digest)
@@ -464,9 +407,17 @@ def publish_article(
             typer.echo("No network request was sent. Add --execute only after review.")
         return
     exact_approvals = ApprovalLedger(product.root)
-    if not exact_approvals.has(ApprovalScope.ARTICLE, article_revision, article.digest):
+    if not exact_approvals.has(
+        ApprovalScope.ARTICLE,
+        article_revision,
+        bundle.article_digest,
+    ):
         raise typer.BadParameter(f"exact article approval is missing: {article_revision}")
-    if not exact_approvals.has(ApprovalScope.COVER, cover_revision, cover.digest):
+    if not exact_approvals.has(
+        ApprovalScope.COVER,
+        cover_revision,
+        bundle.cover_digest,
+    ):
         raise typer.BadParameter(f"exact cover approval is missing: {cover_revision}")
     if not exact_approvals.has(
         ApprovalScope.ARTICLE_PUBLICATION,
@@ -486,7 +437,13 @@ def publish_article(
         push_to_wechat=True,
     )
     channels = interpret_article_result(result)
-    log_path = write_article_publish_log(product.root, preview, result, channels)
+    log_path = write_article_publish_log(
+        product.root,
+        preview,
+        result,
+        channels,
+        secret_values=(website_token,),
+    )
     payload = {
         "ok": result.state == PublicationState.SUCCEEDED,
         "mode": "publish",
@@ -497,7 +454,10 @@ def publish_article(
         "site": channels.site,
         "cover": channels.cover,
         "wechat": channels.wechat,
-        "response": redact_publication_data(result.response),
+        "response": redact_publication_data(
+            result.response,
+            secret_values=(website_token,),
+        ),
         "error": result.error,
         "logFile": str(log_path.relative_to(product.root)),
     }
@@ -558,13 +518,7 @@ def _build_stage_commands(
     product_root = product.root.resolve()
     approvals = ApprovalLedger(product.root)
     publications = PublicationLedger(product.root)
-    allowed = {
-        "article",
-        "video",
-        "social:xiaohongshu",
-        "social:douyin",
-        "social:bilibili",
-    }
+    allowed = {item.value for item in PipelineStage}
     invalid = [stage for stage in stages if stage not in allowed]
     if invalid:
         raise typer.BadParameter("unsupported stage: " + ", ".join(invalid), param_hint="--stage")
@@ -573,8 +527,15 @@ def _build_stage_commands(
 
     commands: list[StageCommand] = []
     for stage in stages:
+        stage_name = PipelineStage(stage)
         blockers: list[str] = []
-        if stage == "article":
+        if stage_name is PipelineStage.ARTICLE:
+            try:
+                LocalConfig(project_root).load()
+            except Exception:
+                blockers.append(
+                    "website/WeChat production credentials are missing or invalid"
+                )
             if not article_revision or not cover_revision:
                 raise typer.BadParameter(
                     "article stage requires --article-revision and --cover-revision",
@@ -609,44 +570,34 @@ def _build_stage_commands(
                 destination_slug,
                 True,
             )
-            article = _preflight_artifact(
-                workspace,
-                product,
-                ArtifactKind.ARTICLE,
-                article_revision,
-                blockers,
-            )
-            cover = _preflight_artifact(
-                workspace,
-                product,
-                ArtifactKind.COVER,
-                cover_revision,
-                blockers,
-            )
-            if article is not None and not approvals.has(
+            bundle = None
+            try:
+                bundle = load_article_publication_bundle(
+                    workspace,
+                    product,
+                    article_revision,
+                    cover_revision,
+                )
+            except ArtifactIntegrityError as error:
+                blockers.extend(error.issues)
+            except ArticleValidationError as error:
+                blockers.extend(error.issues)
+            if bundle is not None and not approvals.has(
                 ApprovalScope.ARTICLE,
                 article_revision,
-                article.digest,
+                bundle.article_digest,
             ):
                 blockers.append(f"missing exact approval: article:{article_revision}")
-            if cover is not None and not approvals.has(
+            if bundle is not None and not approvals.has(
                 ApprovalScope.COVER,
                 cover_revision,
-                cover.digest,
+                bundle.cover_digest,
             ):
                 blockers.append(f"missing exact approval: cover:{cover_revision}")
-            if article is not None and cover is not None:
-                blockers.extend(
-                    validate_article_bundle(
-                        (article.root / "article.mdx").read_text(encoding="utf-8"),
-                        (article.root / "body.html").read_text(encoding="utf-8"),
-                        (article.root / "index.html").read_text(encoding="utf-8"),
-                        (cover.root / "cover.png").read_bytes(),
-                    )
-                )
+            if bundle is not None:
                 publication_digest = article_publication_content_digest(
-                    article.digest,
-                    cover.digest,
+                    bundle.article_digest,
+                    bundle.cover_digest,
                     destination_slug,
                     True,
                 )
@@ -665,7 +616,7 @@ def _build_stage_commands(
                 blockers.append(
                     f"website/WeChat prior state is {prior_publication}; reconcile before retry"
                 )
-        elif stage == "video":
+        elif stage_name is PipelineStage.VIDEO:
             if not script_revision:
                 raise typer.BadParameter(
                     "video stage requires --script-revision",
@@ -746,7 +697,8 @@ def _build_stage_commands(
                     f"{stage} requires --video-revision and --copy-revision",
                     param_hint=f"--stage {stage}",
                 )
-            platform = SocialPlatform(stage.split(":", 1)[1])
+            platform = stage_name.platform
+            assert platform is not None
             args = (
                 "social",
                 "publish",
@@ -1340,142 +1292,28 @@ def render_video(
 ) -> None:
     workspace = ProductWorkspace(product_root.parent)
     product = workspace.load(product_root)
-    script_artifact = _verified_artifact(
-        workspace,
-        product,
-        ArtifactKind.VIDEO_SCRIPT,
-        script_revision,
-    )
-    if not ApprovalLedger(product.root).has(
-        ApprovalScope.VIDEO_SCRIPT,
-        script_revision,
-        script_artifact.digest,
-    ):
-        raise typer.BadParameter(
-            f"explicit video-script approval is required for {script_revision}"
-        )
-    script_path = script_artifact.root / "script.json"
-    spec = VideoScriptSpec.model_validate_json(script_path.read_text(encoding="utf-8"))
     settings = LocalConfig(project_root).load()
-    if (narration_audio is None) != (subtitles is None):
-        raise typer.BadParameter(
-            "--narration-audio and --subtitles must be supplied together"
-        )
-    local_narration = narration_audio is not None and subtitles is not None
-    if local_narration:
-        if not narration_audio.is_file():
-            raise typer.BadParameter(f"local narration audio is missing: {narration_audio}")
-        if not subtitles.is_file():
-            raise typer.BadParameter(f"local subtitles are missing: {subtitles}")
-    elif not allow_edge_tts_data_transfer:
-        raise typer.BadParameter(
-            "Edge TTS sends the approved narration text to Microsoft; explicit "
-            "--allow-edge-tts-data-transfer is required, or provide local "
-            "--narration-audio and --subtitles"
-        )
-    if material_revision is None and not allow_pexels_data_transfer:
-        raise typer.BadParameter(
-            "Pexels receives the approved material search terms; explicit "
-            "--allow-pexels-data-transfer is required, or provide --material-revision"
-        )
-    staging = product.root / "video" / "work" / f"render-{uuid4().hex}"
-    staging.mkdir(parents=True, exist_ok=False)
-
-    if material_revision is not None:
-        material_artifact = _verified_artifact(
-            workspace,
-            product,
-            ArtifactKind.VIDEO_MATERIAL,
-            material_revision,
-        )
-        material_root = material_artifact.root
-        material_paths = sorted(
-            path
-            for path in material_root.iterdir()
-            if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
-        )
-        if not material_paths:
-            raise typer.BadParameter(
-                f"video-material revision contains no supported files: {material_revision}"
+    try:
+        result = VideoRenderWorkflow(
+            workspace=workspace,
+            product=product,
+            settings=settings,
+        ).render(
+            VideoRenderRequest(
+                script_revision=script_revision,
+                material_revision=material_revision,
+                bgm_directory=bgm_directory,
+                narration_audio=narration_audio,
+                subtitles=subtitles,
+                allow_edge_tts_data_transfer=allow_edge_tts_data_transfer,
+                allow_pexels_data_transfer=allow_pexels_data_transfer,
             )
-    else:
-        api_key = settings.pexels.api_key.get_secret_value()
-        if not api_key:
-            raise typer.BadParameter(
-                "Pexels API key is missing; edit .local/secrets.toml or pass --material-revision"
-            )
-        downloads = PexelsMaterialSource(api_key=api_key).acquire(
-            terms=spec.material_terms,
-            destination=staging / "materials",
-            max_files=min(6, max(1, len(spec.material_terms))),
         )
-        material_paths = [item.path for item in downloads]
-
-    bgm: Path | None = None
-    if bgm_directory is not None:
-        candidates = sorted(
-            path
-            for path in bgm_directory.iterdir()
-            if path.is_file() and path.suffix.lower() in {".mp3", ".m4a", ".wav", ".aac"}
-        )
-        if not candidates:
-            raise typer.BadParameter(f"BGM directory contains no supported audio: {bgm_directory}")
-        bgm = random.SystemRandom().choice(candidates)
-
-    if local_narration:
-        narration_root = staging / "narration"
-        narration_root.mkdir(parents=True)
-        local_audio = narration_root / f"narration{narration_audio.suffix.lower()}"
-        local_subtitles = narration_root / "subtitles.srt"
-        shutil.copy2(narration_audio, local_audio)
-        shutil.copy2(subtitles, local_subtitles)
-        (narration_root / "script.txt").write_text(
-            spec.narration + "\n",
-            encoding="utf-8",
-        )
-        narration = NarrationResult(
-            root=narration_root,
-            audio_path=local_audio,
-            subtitles_path=local_subtitles,
-            voice="local",
-        )
-    else:
-        narration = EdgeTtsNarrator(
-            timeout_seconds=settings.tts.request_timeout_seconds
-        ).synthesize(
-            narration=spec.narration,
-            voice=settings.tts.voice,
-            output_root=staging / "narration",
-        )
-    rendered = FfmpegExplainerRenderer().render_from_assets(
-        materials=material_paths,
-        narration_audio=narration.audio_path,
-        subtitles=narration.subtitles_path,
-        output_root=staging / "output",
-        bgm=bgm,
-    )
-    (staging / "workflow.json").write_text(
-        json.dumps(
-            {
-                "scriptRevision": script_revision,
-                "materialRevision": material_revision,
-                "voice": narration.voice,
-                "narrationSource": "local" if local_narration else "edge-tts",
-                "bgm": str(bgm) if bgm else None,
-                "profile": "landscape-explainer-v1",
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    revision = workspace.commit_revision_directory(
-        product,
-        ArtifactKind.VIDEO_RENDER,
-        staging,
-    )
-    final_path = revision.root / "output" / rendered.video_path.name
+    except (ArtifactIntegrityError, VideoWorkflowError, ValidationError) as error:
+        raise typer.BadParameter(str(error)) from error
+    revision = result.revision
+    rendered = result.rendered
+    final_path = result.final_path
     payload = {
         "ok": True,
         "artifact": {
@@ -1797,80 +1635,55 @@ def publish_social_video(
 ) -> None:
     workspace = ProductWorkspace(product_root.parent)
     product = workspace.load(product_root)
-    video_artifact = _verified_artifact(
-        workspace,
-        product,
-        ArtifactKind.VIDEO_RENDER,
-        video_revision,
-    )
-    copy_artifact = _verified_snapshot(
-        workspace,
-        product,
-        ArtifactKind.SOCIAL_COPY,
-        copy_revision,
-    )
-    approvals = ApprovalLedger(product.root)
-    key = social_publication_approval_key(video_revision, copy_revision, platform)
-    publication_digest = social_publication_content_digest(
-        video_artifact.digest,
-        copy_artifact.digest,
-        platform,
-    )
-    missing = []
-    if not approvals.has(ApprovalScope.VIDEO, video_revision, video_artifact.digest):
-        missing.append(f"video:{video_revision}")
-    if not approvals.has(ApprovalScope.SOCIAL_PUBLICATION, key, publication_digest):
-        missing.append(f"social-publication:{key}")
-    if missing:
-        raise typer.BadParameter("missing explicit approval: " + ", ".join(missing))
-
-    publications = PublicationLedger(product.root)
-    destination = f"social:{platform.value}"
-    prior = publications.get_state(destination, key)
-    if prior == SocialPublicationState.SUBMITTED.value:
-        raise typer.BadParameter(f"publication already submitted: {destination}:{key}")
-    if prior in {
-        SocialPublicationState.UNKNOWN.value,
-        "partial",
-        "running",
-    }:
-        raise typer.BadParameter(
-            f"prior publication state is {prior}; reconcile before retrying: "
-            f"{destination}:{key}"
+    driver = None
+    if execute:
+        settings = LocalConfig(project_root).load()
+        configured_chrome = (
+            Path(settings.browser.chrome_path) if settings.browser.chrome_path else None
         )
-
-    video_path = video_artifact.root / "output" / "final.mp4"
+        typer.echo(
+            (
+                f"Opening visible {platform.value} Chrome profile. "
+                "If login is required, complete it in the window; login state remains only in "
+                f".local/browser-profiles/{platform.value}."
+            ),
+            err=True,
+        )
+        driver = LocalChromeCdpDriver(
+            project_root=project_root,
+            chrome_path=configured_chrome,
+        )
     try:
-        copy_json = copy_artifact.files["copy.json"].decode("utf-8")
-    except (KeyError, UnicodeError) as error:
-        raise typer.BadParameter(
-            "verified social-copy revision is missing UTF-8 copy.json",
-            param_hint="--copy-revision",
-        ) from error
-    bundle = SocialCopyBundle.model_validate_json(copy_json)
-    platform_copy = bundle.platforms[platform]
-    spec = SocialPostSpec(
-        platform=platform,
-        title=platform_copy.title,
-        body=platform_copy.body,
-        tags=platform_copy.tags,
-        video_path=video_path,
-        category=platform_copy.category,
-    )
-    if not video_path.is_file():
-        raise typer.BadParameter(f"approved video file is missing: {video_path}")
+        outcome = SocialPublicationWorkflow(
+            workspace=workspace,
+            product=product,
+            driver=driver,
+            cdp_factory=CdpWebSocketClient if execute else None,
+            page_attach=ChromePageController.attach if execute else None,
+            publisher_factory=VisibleChromePlatformPublisher,
+            warning_sink=lambda warning: typer.echo(f"WARNING: {warning}", err=True),
+        ).publish(
+            SocialPublicationRequest(
+                platform=platform,
+                video_revision=video_revision,
+                copy_revision=copy_revision,
+                execute=execute,
+            )
+        )
+    except (ArtifactIntegrityError, SocialPublicationWorkflowError, ValidationError) as error:
+        raise typer.BadParameter(str(error)) from error
 
-    if not execute:
+    if outcome.mode == "dry-run":
         payload = {
             "ok": True,
-            "mode": "dry-run",
-            "state": "planned",
+            "mode": outcome.mode,
+            "state": outcome.state,
             "platform": platform.value,
-            "video": str(video_path),
-            "title": spec.title,
-            "body": spec.body,
-            "tags": spec.tags,
-            "category": spec.category,
+            "video": str(outcome.video_path),
+            "title": outcome.title,
+            "body": outcome.body,
+            "tags": outcome.tags,
+            "category": outcome.category,
         }
         if json_output:
             typer.echo(json.dumps(payload, ensure_ascii=False))
@@ -1879,177 +1692,31 @@ def publish_social_video(
             typer.echo("Chrome was not opened. Add --execute only after review.")
         return
 
-    settings = LocalConfig(project_root).load()
-    configured_chrome = Path(settings.browser.chrome_path) if settings.browser.chrome_path else None
-    contract = CONTRACTS[platform]
-    typer.echo(
-        (
-            f"Opening visible {platform.value} Chrome profile. "
-            "If login is required, complete it in the window; login state remains only in "
-            f".local/browser-profiles/{platform.value}."
+    payload = {
+        "ok": outcome.state == SocialPublicationState.SUBMITTED.value,
+        "platform": platform.value,
+        "state": outcome.state,
+        "message": outcome.message,
+        "permalink": outcome.permalink,
+        "logFile": (
+            str(outcome.log_path.relative_to(product.root)) if outcome.log_path else None
         ),
-        err=True,
-    )
-    driver = LocalChromeCdpDriver(
-        project_root=project_root,
-        chrome_path=configured_chrome,
-    )
-    staging_root = product.root / "publish" / ".staging"
-    for cleanup_warning in _sweep_private_snapshots(staging_root):
-        typer.echo(f"WARNING: {cleanup_warning}", err=True)
-    staging_path = staging_root / f"{uuid4()}-{platform.value}.mp4"
-    try:
-        video_copy = workspace.copy_verified_file(
-            product,
-            ArtifactKind.VIDEO_RENDER,
-            video_revision,
-            "output/final.mp4",
-            staging_path,
+        "screenshotFile": (
+            str(outcome.screenshot_path.relative_to(product.root))
+            if outcome.screenshot_path
+            else None
+        ),
+    }
+    if json_output:
+        typer.echo(json.dumps(payload, ensure_ascii=False))
+    else:
+        typer.echo(f"{platform.value}: {outcome.state} — {outcome.message}")
+        if outcome.log_path:
+            typer.echo(f"Log: {outcome.log_path}")
+    if outcome.state != SocialPublicationState.SUBMITTED.value:
+        raise typer.Exit(
+            code=3 if outcome.state == SocialPublicationState.WAITING_FOR_USER.value else 1
         )
-    except ArtifactIntegrityError as error:
-        raise typer.BadParameter(str(error), param_hint="--video-revision") from error
-    try:
-        exact_publication_digest = social_publication_content_digest(
-            video_copy.revision_digest,
-            copy_artifact.digest,
-            platform,
-        )
-        exact_video_approved = approvals.has(
-            ApprovalScope.VIDEO,
-            video_revision,
-            video_copy.revision_digest,
-        )
-        exact_publication_approved = approvals.has(
-            ApprovalScope.SOCIAL_PUBLICATION,
-            key,
-            exact_publication_digest,
-        )
-        if not exact_video_approved or not exact_publication_approved:
-            raise typer.BadParameter("exact social publication approval changed before upload")
-        spec = spec.model_copy(update={"video_path": video_copy.path})
-        session = None
-        try:
-            session = driver.launch(platform=platform.value, start_url=contract.upload_url)
-            cdp = CdpWebSocketClient(session.websocket_url)
-        except BaseException:
-            if session is not None and session.process_id is not None:
-                try:
-                    driver.stop_launched_session(session)
-                except BaseException:
-                    pass
-            raise
-        timestamp = datetime.now(UTC)
-        screenshot_path: Path | None = None
-        page = None
-        result = SocialPublishResult(
-            platform=platform,
-            state=SocialPublicationState.UNKNOWN,
-            message="browser automation did not complete; reconcile before retrying",
-        )
-        try:
-            attempt = publications.begin_attempt(destination, key)
-            if not attempt.claim.acquired:
-                raise typer.BadParameter(
-                    f"publication is already claimed with state {attempt.claim.prior_state}: "
-                    f"{destination}:{key}"
-                )
-            with attempt:
-                try:
-                    page = ChromePageController.attach(cdp)
-                except Exception as error:
-                    result = SocialPublishResult(
-                        platform=platform,
-                        state=SocialPublicationState.FAILED,
-                        message=(
-                            "the local creator page could not be attached before publication; "
-                            f"this attempt is safe to retry ({type(error).__name__})"
-                        ),
-                    )
-                else:
-                    attempt.mark_external_started()
-                    try:
-                        result = VisibleChromePlatformPublisher(platform).publish(page, spec)
-                    except Exception as error:
-                        result = SocialPublishResult(
-                            platform=platform,
-                            state=SocialPublicationState.UNKNOWN,
-                            message=(
-                                "browser automation was interrupted after opening the creator flow; "
-                                f"reconcile before retrying ({type(error).__name__})"
-                            ),
-                        )
-                attempt.finish(PublicationRecordState(result.state.value))
-        finally:
-            if page is not None and result.state != SocialPublicationState.SUBMITTED:
-                candidate = product.root / "logs" / (
-                    timestamp.isoformat().replace(":", "-").replace(".", "-")
-                    + f"-{platform.value}.png"
-                )
-                try:
-                    screenshot_path = page.screenshot(candidate)
-                except BaseException:
-                    screenshot_path = None
-            try:
-                cdp.close()
-            except BaseException:
-                pass
-
-        log_root = product.root / "logs"
-        log_root.mkdir(exist_ok=True)
-        log_path = log_root / (
-            timestamp.isoformat().replace(":", "-").replace(".", "-")
-            + f"-{platform.value}.json"
-        )
-        log_path.write_text(
-            json.dumps(
-                {
-                    "timestamp": timestamp.isoformat(),
-                    "destination": destination,
-                    "idempotencyKey": key,
-                    "videoRevision": video_revision,
-                    "copyRevision": copy_revision,
-                    "platform": platform.value,
-                    "state": result.state.value,
-                    "message": result.message,
-                    "permalink": result.permalink,
-                    "screenshotFile": (
-                        str(screenshot_path.relative_to(product.root))
-                        if screenshot_path is not None
-                        else None
-                    ),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        payload = {
-            "ok": result.state == SocialPublicationState.SUBMITTED,
-            "platform": platform.value,
-            "state": result.state.value,
-            "message": result.message,
-            "permalink": result.permalink,
-            "logFile": str(log_path.relative_to(product.root)),
-            "screenshotFile": (
-                str(screenshot_path.relative_to(product.root))
-                if screenshot_path is not None
-                else None
-            ),
-        }
-        if json_output:
-            typer.echo(json.dumps(payload, ensure_ascii=False))
-        else:
-            typer.echo(f"{platform.value}: {result.state.value} — {result.message}")
-            typer.echo(f"Log: {log_path}")
-        if result.state != SocialPublicationState.SUBMITTED:
-            raise typer.Exit(
-                code=3 if result.state == SocialPublicationState.WAITING_FOR_USER else 1
-            )
-    finally:
-        cleanup_warning = _remove_private_snapshot(video_copy.path)
-        if cleanup_warning is not None:
-            typer.echo(f"WARNING: {cleanup_warning}", err=True)
 
 
 @product_app.command("create")

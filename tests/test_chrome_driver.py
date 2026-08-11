@@ -245,18 +245,31 @@ def test_chrome_driver_stops_only_a_session_launched_by_this_driver(tmp_path):
     chrome = tmp_path / "chrome.exe"
     chrome.write_bytes(b"exe")
     launched = FakeProcess()
-    driver = LocalChromeCdpDriver(project_root=tmp_path, chrome_path=chrome)
-    driver._processes["bilibili"] = launched
 
-    from agent_content_pipeline.browser.chrome import ChromeSession
+    def launch(command):
+        profile_arg = next(item for item in command if item.startswith("--user-data-dir="))
+        profile = Path(profile_arg.split("=", 1)[1])
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / "DevToolsActivePort").write_text("53123\n/devtools/browser/abc\n")
+        return launched
 
-    owned = ChromeSession(
-        platform="bilibili",
-        profile_root=tmp_path / ".local" / "browser-profiles" / "bilibili",
-        port=53123,
-        websocket_url="ws://owned",
-        process_id=launched.pid,
+    def http(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "Browser": "Chrome/140.0.0.0",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:53123/devtools/browser/abc",
+            },
+            request=request,
+        )
+
+    driver = LocalChromeCdpDriver(
+        project_root=tmp_path,
+        chrome_path=chrome,
+        process_launcher=launch,
+        http_client=httpx.Client(transport=httpx.MockTransport(http)),
     )
+    owned = driver.launch(platform="bilibili", start_url="https://example.com/upload")
     existing = owned.model_copy(update={"process_id": None})
 
     driver.stop_launched_session(existing)

@@ -26,6 +26,8 @@ The CLI requires `--allow-edge-tts-data-transfer` before constructing the online
 
 Article publication sends one manifest-verified snapshot of the approved MDX, WeChat HTML, and cover to the configured VPS. Social publication reads copy from a verified snapshot and exposes a private, manifest-bound MP4 copy only to the selected creator page in visible Chrome; the temporary copy stays inside the Product and is removed after the attempt.
 
+Video rendering likewise uses the exact verified `script.json` bytes and a streamed Product-local snapshot of sealed local materials. Approved scripts and materials are never verified by path and then re-read from the mutable source path for TTS or FFmpeg.
+
 Every artifact revision is sealed with a local SHA-256 manifest. Artifact and publication approvals retain the associated content digest. A missing or changed file blocks later approval or execution. Legacy revisions require an explicit seal operation and must then be approved normally. A valid legacy hash is not treated as content validity: the exact MDX, WeChat body/full HTML, and PNG bytes are revalidated before preview, publication approval, preflight, and execution.
 
 ## Reporting

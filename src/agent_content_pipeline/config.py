@@ -6,8 +6,40 @@ import re
 import subprocess
 import tomllib
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+
+
+_PLACEHOLDER_HOSTS = {
+    "example.com",
+    "www.example.com",
+    "localhost",
+}
+
+
+def validate_website_wechat_credentials(endpoint: str, bearer_token: str) -> tuple[str, str]:
+    """Validate the fixed-IP VPS seam without exposing either value."""
+
+    normalized_endpoint = endpoint.strip()
+    parsed = urlsplit(normalized_endpoint)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.hostname.lower() in _PLACEHOLDER_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/") != "/api/articles"
+    ):
+        raise ValueError(
+            "website/WeChat endpoint must be a configured HTTPS /api/articles VPS route"
+        )
+    normalized_token = bearer_token.strip()
+    if not normalized_token:
+        raise ValueError("website/WeChat bearer token is missing")
+    return normalized_endpoint, normalized_token
 
 
 class WebsiteWechatSecrets(BaseModel):
@@ -16,6 +48,20 @@ class WebsiteWechatSecrets(BaseModel):
     endpoint: str = Field(min_length=1)
     bearer_token: SecretStr
     request_timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        endpoint, _ = validate_website_wechat_credentials(value, "validation-placeholder")
+        return endpoint
+
+    @field_validator("bearer_token")
+    @classmethod
+    def validate_bearer_token(cls, value: SecretStr) -> SecretStr:
+        token = value.get_secret_value().strip()
+        if not token:
+            raise ValueError("website/WeChat bearer token is missing")
+        return SecretStr(token)
 
 
 class PexelsSecrets(BaseModel):

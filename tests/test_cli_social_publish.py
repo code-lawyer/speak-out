@@ -31,7 +31,7 @@ def test_social_publish_uses_exact_approvals_and_records_independent_result(tmp_
     (local / "secrets.toml").write_text(
         """
 [website_wechat]
-endpoint = "https://example.com/api/articles"
+endpoint = "https://hillward.top/api/articles"
 bearer_token = "unused"
 
 [browser]
@@ -265,6 +265,15 @@ chrome_path = "C:/fake/chrome.exe"
         return original_has(self, scope, revision, content_digest)
 
     monkeypatch.setattr(ApprovalLedger, "has", interrupt_after_private_copy)
+    staging_root = product.root / "publish" / ".staging"
+    original_unlink = Path.unlink
+
+    def windows_upload_lock(path, *args, **kwargs):
+        if path.parent == staging_root and path.suffix == ".mp4":
+            raise PermissionError("file is still held by Chrome")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", windows_upload_lock)
     interrupted = CliRunner().invoke(
         app,
         [
@@ -285,8 +294,10 @@ chrome_path = "C:/fake/chrome.exe"
         ],
     )
     assert interrupted.exit_code == 130
-    assert not list((product.root / "publish" / ".staging").glob("*.mp4"))
+    assert len(list(staging_root.glob("*.mp4"))) == 1
+    assert len(list(staging_root.glob("*.cleanup-pending"))) == 1
     monkeypatch.setattr(ApprovalLedger, "has", original_has)
+    monkeypatch.setattr(Path, "unlink", original_unlink)
 
     result = CliRunner().invoke(
         app,
@@ -314,7 +325,8 @@ chrome_path = "C:/fake/chrome.exe"
     assert payload["state"] == "submitted"
     assert (product.root / payload["logFile"]).is_file()
     assert len(driver_calls) == 1
-    assert not list((product.root / "publish" / ".staging").glob("*.mp4"))
+    assert not list(staging_root.glob("*.mp4"))
+    assert not list(staging_root.glob("*.cleanup-pending"))
     status = CliRunner().invoke(
         app,
         ["product", "status", "--product", str(product.root), "--json"],
@@ -382,7 +394,7 @@ def test_social_close_only_closes_the_platform_dedicated_profile(tmp_path, monke
     (local / "secrets.toml").write_text(
         """
 [website_wechat]
-endpoint = "https://example.com/api/articles"
+endpoint = "https://hillward.top/api/articles"
 bearer_token = "unused"
 
 [browser]
@@ -426,45 +438,3 @@ chrome_path = "C:/fake/chrome.exe"
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["browser"] == "closed"
     assert closed == ["bilibili"]
-
-
-def test_private_snapshot_cleanup_retries_and_records_persistent_windows_lock(
-    tmp_path,
-    monkeypatch,
-):
-    staging = tmp_path / "publish" / ".staging"
-    staging.mkdir(parents=True)
-    snapshot = staging / "private.mp4"
-    snapshot.write_bytes(b"video")
-    original_unlink = Path.unlink
-    attempts = 0
-
-    def transient_lock(path, *args, **kwargs):
-        nonlocal attempts
-        if path == snapshot and attempts < 2:
-            attempts += 1
-            raise PermissionError("file is still held by Chrome")
-        return original_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", transient_lock)
-    assert cli._remove_private_snapshot(snapshot, delay_seconds=0) is None
-    assert attempts == 2
-    assert snapshot.exists() is False
-
-    snapshot.write_bytes(b"video")
-
-    def persistent_lock(path, *args, **kwargs):
-        if path == snapshot:
-            raise PermissionError("file is still held by Chrome")
-        return original_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", persistent_lock)
-    warning = cli._remove_private_snapshot(snapshot, attempts=2, delay_seconds=0)
-    marker = snapshot.with_suffix(snapshot.suffix + ".cleanup-pending")
-    assert warning is not None
-    assert marker.is_file()
-
-    monkeypatch.setattr(Path, "unlink", original_unlink)
-    cli._sweep_private_snapshots(staging, delay_seconds=0)
-    assert snapshot.exists() is False
-    assert marker.exists() is False

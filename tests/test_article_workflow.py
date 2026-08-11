@@ -12,6 +12,7 @@ from agent_content_pipeline.pipeline import (
     UnsafeToRetry,
     article_publication_approval_key,
     article_publication_content_digest,
+    load_article_publication_bundle,
 )
 from agent_content_pipeline.publishing.article import (
     ArticlePublishPreview,
@@ -283,6 +284,17 @@ def test_pipeline_detects_changed_revision_bytes_before_constructing_request(tmp
 
     with pytest.raises(ArtifactIntegrityError):
         publish_v001(workflow_for(workspace, product, MustNotPublish()))
+
+
+def test_pipeline_article_bundle_keeps_the_verified_bytes_for_preview_and_approval(tmp_path):
+    workspace, product, article, _cover = create_verified_product(tmp_path)
+
+    bundle = load_article_publication_bundle(workspace, product, "v001", "v001")
+    (article.root / "article.mdx").write_text("tampered-after-load", encoding="utf-8")
+
+    assert "斩我斋：测试文章" in bundle.markdown
+    assert "tampered-after-load" not in bundle.markdown
+    assert bundle.article_digest == article.digest
 
 
 def test_pipeline_publishes_the_verified_snapshot_if_files_change_after_read(tmp_path):

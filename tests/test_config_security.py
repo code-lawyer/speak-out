@@ -29,3 +29,32 @@ bearer_token = "must-not-leak"
 
     assert "tracked by Git" in str(error.value)
     assert "must-not-leak" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "token"),
+    (
+        ("https://example.com/api/articles", "configured-token"),
+        ("https://hillward.top/api/articles", ""),
+        ("http://hillward.top/api/articles", "configured-token"),
+        ("https://hillward.top/not-the-article-route", "configured-token"),
+    ),
+)
+def test_config_refuses_unready_article_publication_credentials(
+    tmp_path,
+    endpoint,
+    token,
+):
+    local = tmp_path / ".local"
+    local.mkdir()
+    (local / "secrets.toml").write_text(
+        (
+            "[website_wechat]\n"
+            f'endpoint = "{endpoint}"\n'
+            f'bearer_token = "{token}"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        LocalConfig(tmp_path).load()

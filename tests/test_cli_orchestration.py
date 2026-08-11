@@ -81,6 +81,40 @@ def test_run_cli_is_dry_by_default_and_builds_independent_exact_commands(tmp_pat
     assert StageAttemptLedger(product.root).list() == []
 
 
+def test_article_preflight_blocks_an_unedited_secret_template(tmp_path):
+    product = create_product(tmp_path)
+    local = tmp_path / ".local"
+    local.mkdir()
+    (local / "secrets.toml").write_text(
+        "[website_wechat]\n"
+        'endpoint = "https://example.com/api/articles"\n'
+        'bearer_token = ""\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--project-root",
+            str(tmp_path),
+            "--product",
+            str(product.root),
+            "--stage",
+            "article",
+            "--article-revision",
+            "v001",
+            "--cover-revision",
+            "v001",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    blockers = json.loads(result.stdout)["stages"][0]["output"]["blockers"]
+    assert "website/WeChat production credentials are missing or invalid" in blockers
+
+
 def test_video_plan_explains_both_external_data_transfer_gates(tmp_path):
     product = create_product(tmp_path)
 

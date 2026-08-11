@@ -39,6 +39,18 @@ def test_article_preview_preserves_the_proven_vps_request_contract():
     assert "must-not-appear-in-preview" not in preview.model_dump_json()
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "token"),
+    (
+        ("https://example.com/api/articles", "configured-token"),
+        ("https://hillward.top/api/articles", ""),
+    ),
+)
+def test_article_publisher_refuses_placeholder_or_missing_credentials(endpoint, token):
+    with pytest.raises(ValueError):
+        FixedIpVpsPublisher(endpoint=endpoint, bearer_token=token)
+
+
 def test_wechat_preview_refuses_to_continue_without_a_cover():
     spec = ArticlePublicationSpec(
         markdown="---\ntitle: 斩我斋：测试文章\n---\n正文\n",
@@ -66,7 +78,11 @@ def test_article_publish_posts_the_contract_without_exposing_the_secret():
         captured["body"] = request.read()
         return httpx.Response(
             200,
-            json={"success": True, "wechatPushed": True},
+            json={
+                "success": True,
+                "wechatPushed": True,
+                "message": "accepted local-test-secret",
+            },
             request=request,
         )
 
@@ -92,7 +108,11 @@ def test_article_publish_posts_the_contract_without_exposing_the_secret():
     assert captured["authorization"] == "Bearer local-test-secret"
     assert result.state == "succeeded"
     assert result.http_status == 200
-    assert result.response == {"success": True, "wechatPushed": True}
+    assert result.response == {
+        "success": True,
+        "wechatPushed": True,
+        "message": "accepted [REDACTED]",
+    }
     assert "local-test-secret" not in result.model_dump_json()
 
 

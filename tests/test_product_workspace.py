@@ -181,3 +181,68 @@ def test_verified_file_copy_is_bound_to_manifest_and_independent_of_later_source
 
     assert private_copy.revision_digest == revision.digest
     assert private_copy.path.read_bytes() == b"approved-video"
+
+
+def test_verified_revision_copy_streams_every_manifest_file_to_an_independent_snapshot(
+    tmp_path,
+):
+    workspace = ProductWorkspace(tmp_path / "workspace")
+    product = workspace.create(
+        ProductCreateRequest(
+            title="素材目录快照",
+            slug="material-directory-snapshot",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    staging = product.root / "video" / "work" / "materials"
+    (staging / "nested").mkdir(parents=True)
+    (staging / "first.mp4").write_bytes(b"approved-first")
+    (staging / "nested" / "second.webm").write_bytes(b"approved-second")
+    revision = workspace.commit_revision_directory(
+        product,
+        ArtifactKind.VIDEO_MATERIAL,
+        staging,
+    )
+
+    private_copy = workspace.copy_verified_revision(
+        product,
+        ArtifactKind.VIDEO_MATERIAL,
+        "v001",
+        product.root / "video" / "work" / "render" / "materials",
+    )
+    (revision.root / "first.mp4").write_bytes(b"changed-later")
+    (revision.root / "nested" / "second.webm").write_bytes(b"also-changed")
+
+    assert private_copy.revision_digest == revision.digest
+    assert private_copy.root.joinpath("first.mp4").read_bytes() == b"approved-first"
+    assert private_copy.root.joinpath("nested", "second.webm").read_bytes() == b"approved-second"
+    assert tuple(path.relative_to(private_copy.root).as_posix() for path in private_copy.files) == (
+        "first.mp4",
+        "nested/second.webm",
+    )
+
+
+def test_verified_revision_copy_must_remain_inside_the_product(tmp_path):
+    workspace = ProductWorkspace(tmp_path / "workspace")
+    product = workspace.create(
+        ProductCreateRequest(
+            title="素材目录边界",
+            slug="material-directory-boundary",
+            created_on=date(2026, 8, 10),
+        )
+    )
+    workspace.add_revision(
+        product,
+        ArtifactRevisionRequest(
+            kind=ArtifactKind.VIDEO_MATERIAL,
+            files={"first.mp4": b"approved-first"},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="inside the Product"):
+        workspace.copy_verified_revision(
+            product,
+            ArtifactKind.VIDEO_MATERIAL,
+            "v001",
+            tmp_path / "escaped-materials",
+        )

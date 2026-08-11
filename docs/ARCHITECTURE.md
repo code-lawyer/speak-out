@@ -15,9 +15,9 @@ Pipeline Module
     |-- ProductWorkspace Module
     |-- ApprovalLedger Module
     |-- ArticlePublisher Interface -> FixedIpVpsPublisher Adapter
-    |-- VideoRenderer Interface ----> StockExplainerRenderer Adapter
+    |-- VideoRenderWorkflow --------> Narrator / MaterialSource / VideoRenderer Adapters
     |-- BrowserDriver Interface ----> LocalChromeCdpDriver Adapter
-    `-- PlatformPublisher Interface -> Xiaohongshu / Douyin / Bilibili Adapters
+    `-- SocialPublicationWorkflow --> BrowserDriver / PlatformPublisher Adapters
 ```
 
 ## Domain model
@@ -44,6 +44,8 @@ Build a dry-run preview and publish one approved article bundle. The first Adapt
 
 Accept an approved video specification and produce inspected output artifacts. The first Adapter internalizes the useful MoneyPrinterTurbo pipeline: material acquisition, narration, subtitles, preprocessing, composition, and FFmpeg encoding.
 
+`VideoRenderWorkflow` is the application boundary above those Adapters. It reads the approved script as one verified byte snapshot, streams a sealed local-material revision into a private Product-local snapshot, copies local narration and BGM into staging, and renders only from those stable inputs. Success commits the whole staging tree as a revision; every exceptional exit removes the incomplete staging tree.
+
 ### BrowserDriver
 
 Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction, upload, download, and user-intervention primitives. The default Adapter uses local Chrome 116+ and CDP, retries transient probes before declaring an existing Profile stale, cleans up a newly launched process on failure or user interruption, and can explicitly close only that dedicated session.
@@ -51,6 +53,8 @@ Open a visible, dedicated Chrome Profile and provide navigation, DOM interaction
 ### PlatformPublisher
 
 Validate platform metadata, confirm login, upload the approved MP4, submit immediate publication, and return a result. The social workflow reads copy from a manifest-verified byte snapshot and streams the approved MP4 into a private, unpredictable Product-local snapshot whose hash is checked against the sealed revision; that snapshot is retained through browser upload and then removed. Required metadata must be read back from the anchored platform control before submission; Bilibili requires the normalized tag-chip set to exactly equal the approval and the selected category value to match exactly. Each platform is an independent Adapter at this real seam.
+
+`SocialPublicationWorkflow` owns the approval recheck, atomic publication claim, Chrome/CDP resource lifetime, diagnostic capture, log write, and private-upload cleanup. The CLI only constructs the selected local Adapters and renders the structured outcome.
 
 ## Upstream absorption
 
