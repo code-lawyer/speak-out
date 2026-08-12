@@ -159,6 +159,33 @@ def test_publisher_waits_for_platform_upload_completion_before_filling_metadata(
     assert result.state == SocialPublicationState.SUBMITTED
 
 
+def test_remote_completion_remains_bound_after_platform_hides_the_uploaded_filename(
+    tmp_path,
+):
+    page = FakePage(
+        logged_in=True,
+        upload_observations=[
+            {"state": "not_started", "evidence": "upload page is ready"},
+            {"state": "uploading", "evidence": "已上传：99%", "expectedFileSeen": True},
+            {
+                "state": "completed",
+                "evidence": "上传成功",
+                "expectedFileSeen": False,
+                "remoteConfirmed": True,
+            },
+        ],
+    )
+
+    result = VisibleChromePlatformPublisher(
+        SocialPlatform.DOUYIN,
+        confirmation_timeout_seconds=0.01,
+        editor_timeout_seconds=0.01,
+        upload_start_timeout_seconds=0.01,
+    ).publish(page, post(tmp_path, SocialPlatform.DOUYIN))
+
+    assert result.state == SocialPublicationState.SUBMITTED
+
+
 def test_selected_file_is_retained_when_browser_disconnects_before_first_upload_probe(
     tmp_path,
 ):

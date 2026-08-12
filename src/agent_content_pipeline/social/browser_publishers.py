@@ -408,6 +408,7 @@ class _VisibleChromePublisher:
             state=SocialUploadState.NOT_STARTED,
             evidence="platform has not acknowledged the selected file",
         )
+        expected_file_acknowledged = False
         while True:
             now = time.monotonic()
             if not video_path.is_file():
@@ -419,6 +420,9 @@ class _VisibleChromePublisher:
                     "the private upload snapshot disappeared before upload completion",
                 )
             last = self._observe_upload(page, video_path)
+            expected_file_acknowledged = (
+                expected_file_acknowledged or last.expected_file_seen
+            )
             if last.state == SocialUploadState.FAILED:
                 if retrying_failed_upload and now < start_deadline:
                     time.sleep(self._poll_interval_seconds)
@@ -431,7 +435,7 @@ class _VisibleChromePublisher:
                     f"platform reported upload failure: {last.evidence}",
                 )
             if last.state == SocialUploadState.COMPLETED:
-                if not last.expected_file_seen or not last.remote_confirmed:
+                if not expected_file_acknowledged or not last.remote_confirmed:
                     if time.monotonic() >= start_deadline:
                         lifecycle.mark_upload_failed()
                         return self._result(

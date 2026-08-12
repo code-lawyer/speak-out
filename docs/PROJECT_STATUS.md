@@ -33,7 +33,7 @@ clean-clone release run and three live social-platform submissions remain open.
 
 - `speak-out doctor` passed Python 3.12, FFmpeg, FFprobe, configuration,
   `.local/` Git isolation, and Chrome 151.
-- The offline suite passed 129 tests on 2026-08-12.
+- The offline suite passed 130 tests on 2026-08-12.
 - Product `ai-is-coming-for-lawyers` recorded `website-wechat = succeeded`;
   the user confirmed the personal-site article and WeChat draft were received.
 - The same Product produced two inspected 1920x1080 H.264 MP4 revisions with

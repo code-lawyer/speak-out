@@ -7,7 +7,7 @@ This file distinguishes implemented behavior from production evidence. Version 1
 | Requirement | Evidence | Status |
 | --- | --- | --- |
 | Windows runtime dependencies | `speak-out doctor --json` confirmed Python 3.12, FFmpeg, FFprobe, unified config, and installed Chrome on 2026-08-10 | verified |
-| Offline test suite | 129 tests passed on 2026-08-12, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, exact article/video snapshots, provenance-checked media-cache import, retryable Windows cleanup, legacy validation, Chrome cleanup, exact anchored metadata readback, explicit remote upload gating, manifest-bound retained snapshots, interrupted-upload retention, and stale failed-page retry protection | verified |
+| Offline test suite | 130 tests passed on 2026-08-12, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, exact article/video snapshots, provenance-checked media-cache import, retryable Windows cleanup, legacy validation, Chrome cleanup, exact anchored metadata readback, explicit remote upload gating, manifest-bound retained snapshots, interrupted-upload retention, stale failed-page retry protection, and completion binding after a platform hides the uploaded filename | verified |
 | Package build | Source distribution and wheel built with `uv build` | verified |
 | Project-local Agent Skill | Official Skill validator passed for `.agents/skills/speak-out` | verified |
 | Landscape video | Product `ai-is-coming-for-lawyers` produced two inspected 1920×1080 H.264 MP4 revisions with audio and 495.1-second duration | verified |
