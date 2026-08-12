@@ -34,7 +34,7 @@ read these files in order before changing code or running a publication:
 ## Current release boundary
 
 The local/open-source MVP is usable. The website/WeChat route and two real
-1920x1080 video renders have succeeded. The offline suite has 122 passing tests.
+1920x1080 video renders have succeeded. The offline suite has 130 passing tests.
 Version 1.0 is still blocked on a clean-clone end-to-end acceptance run and one
 confirmed live publication to each of Xiaohongshu, Douyin, and Bilibili. Never
 claim those gates passed without updating `docs/RELEASE_EVIDENCE.md` with direct

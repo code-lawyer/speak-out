@@ -58,7 +58,7 @@ from .video.renderer import FfmpegExplainerRenderer
 from .video.workflow import VideoRenderRequest, VideoRenderWorkflow, VideoWorkflowError
 from .browser.cdp import CdpWebSocketClient, ChromePageController
 from .browser.chrome import LocalChromeCdpDriver
-from .social.browser_publishers import CONTRACTS, VisibleChromePlatformPublisher
+from .social.browser_publishers import CONTRACTS, create_visible_chrome_publisher
 from .social.models import (
     SocialCopyBundle,
     SocialPlatform,
@@ -1488,7 +1488,7 @@ def publish_social_video(
             driver=driver,
             cdp_factory=CdpWebSocketClient if execute else None,
             page_attach=ChromePageController.attach if execute else None,
-            publisher_factory=VisibleChromePlatformPublisher,
+            publisher_factory=create_visible_chrome_publisher,
             warning_sink=lambda warning: typer.echo(f"WARNING: {warning}", err=True),
         ).publish(
             SocialPublicationRequest(
@@ -1524,6 +1524,8 @@ def publish_social_video(
         "ok": outcome.state == SocialPublicationState.SUBMITTED.value,
         "platform": platform.value,
         "state": outcome.state,
+        "uploadState": outcome.upload_state.value,
+        "snapshotRetained": outcome.snapshot_retained,
         "message": outcome.message,
         "permalink": outcome.permalink,
         "logFile": (
@@ -1539,6 +1541,10 @@ def publish_social_video(
         typer.echo(json.dumps(payload, ensure_ascii=False))
     else:
         typer.echo(f"{platform.value}: {outcome.state} — {outcome.message}")
+        typer.echo(
+            f"upload={outcome.upload_state.value}, "
+            f"snapshot-retained={'yes' if outcome.snapshot_retained else 'no'}"
+        )
         if outcome.log_path:
             typer.echo(f"Log: {outcome.log_path}")
     if outcome.state != SocialPublicationState.SUBMITTED.value:

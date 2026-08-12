@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
@@ -16,14 +16,25 @@ from ..state import (
     PublicationLedger,
     PublicationRecordState,
 )
-from ..workspace import ArtifactKind, Product, ProductWorkspace
-from .browser_publishers import CONTRACTS, VisibleChromePlatformPublisher
+from ..workspace import (
+    ArtifactFileIdentity,
+    ArtifactKind,
+    Product,
+    ProductWorkspace,
+    VerifiedFileCopy,
+)
+from .browser_publishers import (
+    BrowserPublishLifecycle,
+    CONTRACTS,
+    create_visible_chrome_publisher,
+)
 from .models import (
     SocialCopyBundle,
     SocialPlatform,
     SocialPostSpec,
     SocialPublicationState,
     SocialPublishResult,
+    SocialUploadState,
 )
 
 
@@ -61,6 +72,8 @@ class SocialPublicationOutcome(BaseModel):
     category: str | None = None
     log_path: Path | None = None
     screenshot_path: Path | None = None
+    upload_state: SocialUploadState = SocialUploadState.NOT_STARTED
+    snapshot_retained: bool = False
 
 
 class SocialPublicationWorkflow:
@@ -84,7 +97,7 @@ class SocialPublicationWorkflow:
         self._driver = driver
         self._cdp_factory = cdp_factory
         self._page_attach = page_attach
-        self._publisher_factory = publisher_factory or VisibleChromePlatformPublisher
+        self._publisher_factory = publisher_factory or create_visible_chrome_publisher
         self._approvals = approvals or ApprovalLedger(product.root)
         self._publications = publications or PublicationLedger(product.root)
         self._warning_sink = warning_sink or (lambda _warning: None)
@@ -94,6 +107,12 @@ class SocialPublicationWorkflow:
             self._product,
             ArtifactKind.VIDEO_RENDER,
             request.video_revision,
+        )
+        video_identity = self._workspace.artifact_file_identity(
+            self._product,
+            ArtifactKind.VIDEO_RENDER,
+            request.video_revision,
+            "output/final.mp4",
         )
         copy = self._workspace.read_verified_revision(
             self._product,
@@ -173,14 +192,20 @@ class SocialPublicationWorkflow:
         staging_root = self._product.root / "publish" / ".staging"
         for warning in self._sweep_private_snapshots(staging_root):
             self._warning_sink(warning)
-        private_path = staging_root / f"{uuid4()}-{request.platform.value}.mp4"
-        video_copy = self._workspace.copy_verified_file(
-            self._product,
-            ArtifactKind.VIDEO_RENDER,
-            request.video_revision,
-            "output/final.mp4",
-            private_path,
+        snapshot_id = hashlib.sha256(
+            f"{destination}:{key}:{publication_digest}".encode("utf-8")
+        ).hexdigest()[:24]
+        private_path = staging_root / f"{snapshot_id}-{request.platform.value}.mp4"
+        video_copy = self._load_or_create_private_snapshot(
+            request=request,
+            destination=destination,
+            key=key,
+            publication_digest=publication_digest,
+            private_path=private_path,
+            approved_video=video_identity,
         )
+        lifecycle = BrowserPublishLifecycle()
+        snapshot_retained = False
         try:
             exact_digest = social_publication_content_digest(
                 video_copy.revision_digest,
@@ -205,7 +230,9 @@ class SocialPublicationWorkflow:
                 private_spec,
                 destination,
                 key,
+                lifecycle,
             )
+            snapshot_retained = lifecycle.upload_state == SocialUploadState.UPLOADING
             log_path = self._write_log(
                 request,
                 destination,
@@ -213,6 +240,7 @@ class SocialPublicationWorkflow:
                 result,
                 timestamp,
                 screenshot,
+                snapshot_retained=snapshot_retained,
             )
             return self._outcome(
                 "execute",
@@ -222,11 +250,107 @@ class SocialPublicationWorkflow:
                 permalink=result.permalink,
                 log_path=log_path,
                 screenshot_path=screenshot,
+                upload_state=result.upload_state,
+                snapshot_retained=snapshot_retained,
             )
         finally:
-            warning = self._remove_private_snapshot(video_copy.path)
-            if warning is not None:
-                self._warning_sink(warning)
+            if lifecycle.upload_state == SocialUploadState.UPLOADING:
+                snapshot_retained = True
+            else:
+                warning = self._remove_private_snapshot(video_copy.path)
+                if warning is not None:
+                    self._warning_sink(warning)
+
+    def _load_or_create_private_snapshot(
+        self,
+        *,
+        request: SocialPublicationRequest,
+        destination: str,
+        key: str,
+        publication_digest: str,
+        private_path: Path,
+        approved_video: ArtifactFileIdentity,
+    ) -> VerifiedFileCopy:
+        metadata_path = private_path.with_suffix(".snapshot.json")
+        expected_metadata = {
+            "destination": destination,
+            "idempotencyKey": key,
+            "publicationDigest": publication_digest,
+            "videoRevision": request.video_revision,
+            "copyRevision": request.copy_revision,
+            "platform": request.platform.value,
+        }
+        if private_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise SocialPublicationWorkflowError(
+                    "retained upload snapshot metadata is missing or invalid; "
+                    "do not replace a file that Chrome may still be reading"
+                ) from error
+            if any(metadata.get(name) != value for name, value in expected_metadata.items()):
+                raise SocialPublicationWorkflowError(
+                    "retained upload snapshot belongs to a different approved publication"
+                )
+            file_sha256 = self._sha256_file(private_path)
+            if (
+                metadata.get("fileSha256") != approved_video.file_sha256
+                or file_sha256 != approved_video.file_sha256
+                or private_path.stat().st_size != approved_video.bytes
+            ):
+                raise SocialPublicationWorkflowError(
+                    "retained upload snapshot no longer matches the approved video artifact"
+                )
+            revision_digest = metadata.get("revisionDigest")
+            if revision_digest != approved_video.revision_digest:
+                raise SocialPublicationWorkflowError(
+                    "retained upload snapshot no longer matches the approved video artifact"
+                )
+            return VerifiedFileCopy(
+                path=private_path,
+                revision_digest=revision_digest,
+                file_sha256=file_sha256,
+            )
+
+        metadata_path.unlink(missing_ok=True)
+        video_copy = self._workspace.copy_verified_file(
+            self._product,
+            ArtifactKind.VIDEO_RENDER,
+            request.video_revision,
+            "output/final.mp4",
+            private_path,
+        )
+        if (
+            video_copy.revision_digest != approved_video.revision_digest
+            or video_copy.file_sha256 != approved_video.file_sha256
+            or video_copy.path.stat().st_size != approved_video.bytes
+        ):
+            private_path.unlink(missing_ok=True)
+            raise SocialPublicationWorkflowError(
+                "private upload snapshot does not match the approved video artifact"
+            )
+        metadata = {
+            **expected_metadata,
+            "revisionDigest": video_copy.revision_digest,
+            "fileSha256": video_copy.file_sha256,
+        }
+        try:
+            metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            private_path.unlink(missing_ok=True)
+            raise
+        return video_copy
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _execute_browser_attempt(
         self,
@@ -234,6 +358,7 @@ class SocialPublicationWorkflow:
         spec: SocialPostSpec,
         destination: str,
         key: str,
+        lifecycle: BrowserPublishLifecycle,
     ) -> tuple[SocialPublishResult, datetime, Path | None]:
         assert self._driver is not None
         assert self._cdp_factory is not None
@@ -270,6 +395,7 @@ class SocialPublicationWorkflow:
                     f"{attempt.claim.prior_state}: {destination}:{key}"
                 )
             with attempt:
+                lifecycle.bind_submission_start(attempt.mark_external_started)
                 try:
                     page = self._page_attach(cdp)
                 except Exception as error:
@@ -282,18 +408,32 @@ class SocialPublicationWorkflow:
                         ),
                     )
                 else:
-                    attempt.mark_external_started()
                     try:
-                        result = self._publisher_factory(request.platform).publish(page, spec)
+                        result = self._publisher_factory(request.platform).publish(
+                            page,
+                            spec,
+                            lifecycle=lifecycle,
+                        )
                     except Exception as error:
+                        state = (
+                            SocialPublicationState.UNKNOWN
+                            if lifecycle.submission_started
+                            else SocialPublicationState.FAILED
+                        )
                         result = SocialPublishResult(
                             platform=request.platform,
-                            state=SocialPublicationState.UNKNOWN,
+                            state=state,
                             message=(
-                                "browser automation was interrupted after opening the creator "
-                                "flow; reconcile before retrying "
-                                f"({type(error).__name__})"
+                                "browser automation was interrupted "
+                                + (
+                                    "after the final submit seam; reconcile before retrying "
+                                    if lifecycle.submission_started
+                                    else "before final submission; this stage is safe to retry "
+                                )
+                                + f"({type(error).__name__})"
                             ),
+                            upload_state=lifecycle.upload_state,
+                            submission_started=lifecycle.submission_started,
                         )
                 attempt.finish(PublicationRecordState(result.state.value))
         finally:
@@ -320,6 +460,8 @@ class SocialPublicationWorkflow:
         result: SocialPublishResult,
         timestamp: datetime,
         screenshot: Path | None,
+        *,
+        snapshot_retained: bool,
     ) -> Path:
         log_root = self._product.root / "logs"
         log_root.mkdir(exist_ok=True)
@@ -337,6 +479,9 @@ class SocialPublicationWorkflow:
                     "copyRevision": request.copy_revision,
                     "platform": request.platform.value,
                     "state": result.state.value,
+                    "uploadState": result.upload_state.value,
+                    "submissionStarted": result.submission_started,
+                    "snapshotRetained": snapshot_retained,
                     "message": result.message,
                     "permalink": result.permalink,
                     "screenshotFile": (
@@ -361,6 +506,8 @@ class SocialPublicationWorkflow:
         permalink: str | None = None,
         log_path: Path | None = None,
         screenshot_path: Path | None = None,
+        upload_state: SocialUploadState = SocialUploadState.NOT_STARTED,
+        snapshot_retained: bool = False,
     ) -> SocialPublicationOutcome:
         return SocialPublicationOutcome(
             mode=mode,
@@ -375,6 +522,8 @@ class SocialPublicationWorkflow:
             category=spec.category,
             log_path=log_path,
             screenshot_path=screenshot_path,
+            upload_state=upload_state,
+            snapshot_retained=snapshot_retained,
         )
 
     @staticmethod
@@ -385,10 +534,12 @@ class SocialPublicationWorkflow:
         delay_seconds: float = 0.2,
     ) -> str | None:
         marker = path.with_suffix(path.suffix + ".cleanup-pending")
+        metadata = path.with_suffix(".snapshot.json")
         last_error: OSError | None = None
         for attempt in range(max(1, attempts)):
             try:
                 path.unlink(missing_ok=True)
+                metadata.unlink(missing_ok=True)
                 marker.unlink(missing_ok=True)
                 return None
             except OSError as error:

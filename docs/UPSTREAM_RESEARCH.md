@@ -16,7 +16,7 @@ The new project absorbed the useful pipeline boundaries and failure lessons: fil
 - Repository: https://github.com/yikart/AiToEarn
 - Reviewed main commit: `e8b0bfcce9186b0449b5b20137538394e3bddada`
 - License: MIT
-- Reviewed areas: Bilibili, Douyin, RedNote, and WeChat publish providers, platform metadata, validation, finalize, verify, user-handoff, and polling behavior.
+- Reviewed areas: Bilibili, Douyin, RedNote, and WeChat publish providers, platform metadata, validation, finalize, verify, user-handoff, polling behavior, plus the Electron Bilibili/Douyin/Xiaohongshu multipart upload implementations.
 
 The new project absorbed provider boundaries, platform-specific validation, independent state, `submitted` versus finalized results, user handoff, and reconciliation rules. It did not absorb AiToEarn Cloud, Relay, OAuth storage, MongoDB/Redis, asset hosting, or its current WeChat path.
 
@@ -28,3 +28,5 @@ Important findings:
 - AiToEarn WeChat is incompatible with the maintainer's fixed-IP draft-only requirement.
 
 Therefore the first three local adapters use visible installed Chrome and dedicated Profiles. Their page selectors are isolated contracts and require live verification before the v1 release gate.
+
+After the first live creator-page attempt on 2026-08-12, the Electron upload paths were reviewed in depth. They do not treat local file selection as completion: each obtains a platform upload credential, uploads every chunk with bounded retry, finalizes/merges the remote object, obtains a remote video identifier, and only then creates the work. The local visible-Chrome adapters now preserve that lifecycle without copying AiToEarn's credential transport or private APIs: platform-confirmed upload completion gates metadata and submission, uploads are resumable while their exact private snapshot remains valid, and the irreversible state seam is the final enabled Publish/Submit click.

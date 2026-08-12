@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 Repository: `https://github.com/code-lawyer/speak-out`
 
@@ -24,7 +24,7 @@ clean-clone release run and three live social-platform submissions remain open.
 | Video engine | Edge TTS or local narration, SRT, Pexels/local materials, BGM, FFmpeg, FFprobe |
 | Media reuse | Project-local Pexels cache with sealed provenance and attribution checks |
 | Browser foundation | Visible installed Chrome 116+, dedicated Profiles, CDP, owned-process cleanup |
-| Social adapters | Xiaohongshu, Douyin, Bilibili offline contracts and exact metadata read-back |
+| Social adapters | Platform-specific upload lifecycle, resumable verified snapshots, exact metadata read-back, and final-submit seam for Xiaohongshu, Douyin, and Bilibili |
 | Orchestration | Dry-run planning, approval gates, independent stages, idempotency, retry, reconciliation |
 | Agent interface | Project-local `$speak-out` Skill with progressive references |
 | Compatibility | `acp` CLI alias and `agent_content_pipeline` import path retained |
@@ -33,7 +33,7 @@ clean-clone release run and three live social-platform submissions remain open.
 
 - `speak-out doctor` passed Python 3.12, FFmpeg, FFprobe, configuration,
   `.local/` Git isolation, and Chrome 151.
-- The offline suite passed 122 tests on 2026-08-11.
+- The offline suite passed 130 tests on 2026-08-12.
 - Product `ai-is-coming-for-lawyers` recorded `website-wechat = succeeded`;
   the user confirmed the personal-site article and WeChat draft were received.
 - The same Product produced two inspected 1920x1080 H.264 MP4 revisions with
@@ -66,5 +66,13 @@ portable record; local files are supporting evidence only.
   into a new checkout; create a new Product for the clean-clone acceptance run.
 - Social creator pages are external SPAs. Selector contracts are tested offline,
   but live page changes can still require an Adapter update.
+- The first 2026-08-12 live social attempt exposed an upload-lifecycle defect:
+  Xiaohongshu and Douyin snapshots were deleted at 0%/1%, while Bilibili never
+  acknowledged the selected file. The lifecycle was redesigned and is verified
+  offline: file selection now enters the retained state before CDP can return,
+  only explicit remote progress/completion evidence can release the snapshot,
+  retained bytes are rebound to the sealed artifact manifest, failed-page retries
+  wait for a new upload transition, and each platform has a concrete Adapter.
+  All three destinations still require a new destination-confirmed live run.
 - The fixed-IP VPS is an external dependency owned by the maintainer. Keep its
   current contract stable unless the user explicitly authorizes a server change.

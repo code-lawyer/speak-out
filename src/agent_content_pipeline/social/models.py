@@ -52,6 +52,13 @@ class SocialPublicationState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SocialUploadState(StrEnum):
+    NOT_STARTED = "not_started"
+    UPLOADING = "uploading"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class SocialPublishResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -59,6 +66,8 @@ class SocialPublishResult(BaseModel):
     state: SocialPublicationState
     message: str
     permalink: str | None = None
+    upload_state: SocialUploadState = SocialUploadState.NOT_STARTED
+    submission_started: bool = False
 
 
 class PlatformCopy(BaseModel):
