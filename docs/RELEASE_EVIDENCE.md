@@ -7,7 +7,7 @@ This file distinguishes implemented behavior from production evidence. Version 1
 | Requirement | Evidence | Status |
 | --- | --- | --- |
 | Windows runtime dependencies | `speak-out doctor --json` confirmed Python 3.12, FFmpeg, FFprobe, unified config, and installed Chrome on 2026-08-10 | verified |
-| Offline test suite | 122 tests passed on 2026-08-11, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, exact article/video snapshots, provenance-checked media-cache import, retryable Windows cleanup, legacy validation, Chrome cleanup, and exact anchored metadata readback for all three social platforms | verified |
+| Offline test suite | 129 tests passed on 2026-08-12, including concurrent publication attempts, exception-safe claim resolution, ambiguous VPS outcomes, exact article/video snapshots, provenance-checked media-cache import, retryable Windows cleanup, legacy validation, Chrome cleanup, exact anchored metadata readback, explicit remote upload gating, manifest-bound retained snapshots, interrupted-upload retention, and stale failed-page retry protection | verified |
 | Package build | Source distribution and wheel built with `uv build` | verified |
 | Project-local Agent Skill | Official Skill validator passed for `.agents/skills/speak-out` | verified |
 | Landscape video | Product `ai-is-coming-for-lawyers` produced two inspected 1920×1080 H.264 MP4 revisions with audio and 495.1-second duration | verified |
@@ -24,9 +24,9 @@ The ignored local smoke Product is `workspace/2026-08-10-local-render-smoke`. It
 | Destination or gate | Required proof | Current status |
 | --- | --- | --- |
 | Clean public clone | Clone `code-lawyer/speak-out` into a new directory and complete setup, doctor, tests, Skill validation, and a new Product | pending final acceptance run |
-| Xiaohongshu | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending login and publication approval |
-| Douyin | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending login and publication approval |
-| Bilibili | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending login and publication approval |
+| Xiaohongshu | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending post-fix live revalidation; first attempt failed after the old workflow deleted the source at 0% |
+| Douyin | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending post-fix live revalidation; first attempt failed after the old workflow deleted the source at 1% |
+| Bilibili | Visible dedicated Chrome Profile submits the approved shared MP4 and the creator page confirms success | pending post-fix live revalidation; first attempt never entered the platform upload state |
 | Live reconciliation | At least one safe `waiting_for_user` retry or a destination-checked reconciliation is demonstrated without replaying another destination | pending live opportunity |
 | Production log audit | Logs, screenshots, Git state, and terminal output contain no secret, cookie, token, or private credential | pending after live run |
 

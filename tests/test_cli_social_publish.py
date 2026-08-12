@@ -171,15 +171,20 @@ chrome_path = "C:/fake/chrome.exe"
             self.platform = platform
             self.contract = type("Contract", (), {"upload_url": "https://example.com/upload"})()
 
-        def publish(self, page, spec):
+        def publish(self, page, spec, *, lifecycle):
+            lifecycle.mark_upload_completed()
             if self.platform == SocialPlatform.DOUYIN:
+                lifecycle.mark_submission_started()
                 raise CdpError("connection lost after upload")
             assert spec.video_path.read_bytes() == b"video"
             assert spec.category == "知识"
+            lifecycle.mark_submission_started()
             return SocialPublishResult(
                 platform=spec.platform,
                 state=SocialPublicationState.SUBMITTED,
                 message="accepted",
+                upload_state=lifecycle.upload_state,
+                submission_started=lifecycle.submission_started,
             )
 
     monkeypatch.setattr(cli, "LocalChromeCdpDriver", FakeDriver)
@@ -191,7 +196,7 @@ chrome_path = "C:/fake/chrome.exe"
             return path
 
     monkeypatch.setattr(cli.ChromePageController, "attach", lambda cdp: FakePage())
-    monkeypatch.setattr(cli, "VisibleChromePlatformPublisher", FakePublisher)
+    monkeypatch.setattr(cli, "create_visible_chrome_publisher", FakePublisher)
 
     dry_run = CliRunner().invoke(
         app,

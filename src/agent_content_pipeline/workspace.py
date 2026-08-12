@@ -95,6 +95,14 @@ class VerifiedFileCopy(BaseModel):
     file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class ArtifactFileIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    revision_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    bytes: int = Field(ge=0)
+
+
 class VerifiedRevisionCopy(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -402,6 +410,46 @@ class ProductWorkspace:
             path=destination,
             revision_digest=manifest_digest,
             file_sha256=file_sha256,
+        )
+
+    def artifact_file_identity(
+        self,
+        product: Product,
+        kind: ArtifactKind,
+        revision: str,
+        relative_path: str,
+    ) -> ArtifactFileIdentity:
+        """Return one file identity bound to the sealed revision manifest."""
+
+        relative = Path(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("artifact identity path must stay inside its revision")
+        root = product.root / self._ARTIFACT_PATHS[kind] / revision
+        manifest = self._read_integrity_manifest(root, kind, revision)
+        records = self._manifest_records(manifest)
+        revision_digest = self._records_digest(records)
+        issues: list[str] = []
+        raw_files = manifest.get("files")
+        if not isinstance(raw_files, list) or len(records) != len(raw_files):
+            issues.append("artifact integrity manifest contains invalid file records")
+        if len({str(item["path"]) for item in records}) != len(records):
+            issues.append("artifact integrity manifest contains duplicate file paths")
+        if manifest.get("kind") != kind.value:
+            issues.append(f"artifact kind mismatch: expected {kind.value}")
+        if manifest.get("revision") != revision:
+            issues.append(f"artifact revision mismatch: expected {revision}")
+        if manifest.get("revisionDigest") != revision_digest:
+            issues.append("artifact revision digest mismatch")
+        record = next((item for item in records if item["path"] == relative.as_posix()), None)
+        if record is None:
+            issues.append(f"artifact file is missing from manifest: {relative.as_posix()}")
+        if issues:
+            raise ArtifactIntegrityError(tuple(issues))
+        assert record is not None
+        return ArtifactFileIdentity(
+            revision_digest=revision_digest,
+            file_sha256=record["sha256"],
+            bytes=record["bytes"],
         )
 
     def copy_verified_revision(
